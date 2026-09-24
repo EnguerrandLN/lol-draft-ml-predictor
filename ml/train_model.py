@@ -224,21 +224,11 @@ class DraftDataset(Dataset):
 
 class DraftModel(nn.Module):
     """
-    Réseau de prédiction de champion pour la phase de draft.
+    Réseau de prédiction de champion pour la phase de draft (avec Self-Attention).
 
-    Toutes les entrées (alliés, ennemis, bans) passent dans une Embedding
-    partagée. Cela force le modèle à apprendre une représentation universelle
-    de chaque champion indépendamment de son rôle dans le contexte.
-
-    Le slot masqué (PAD_IDX=0) produit un vecteur nul (padding_idx=0) :
-    il n'influence pas la prédiction — c'est l'implémentation du masquage MLM.
-
-    Args:
-        vocab_size   : Taille du vocabulaire (n_champions + 1 pour padding).
-        embedding_dim: Dimension du vecteur de chaque champion.
-        hidden_dim   : Taille des couches cachées.
-        dropout      : Taux de dropout.
-        n_inputs     : Nombre de slots d'entrée (défaut : 20).
+    Toutes les entrées (alliés, ennemis, bans) passent dans une Embedding partagée.
+    Le Transformer permet aux champions d'interagir entre eux dans la séquence pour
+    comprendre les synergies et les counters de la composition d'équipe.
     """
 
     def __init__(
@@ -257,13 +247,21 @@ class DraftModel(nn.Module):
         flat_dim = n_inputs * embedding_dim    # 20 × 32 = 640
 
         # ── Embedding partagée ────────────────────────────────────────────────
-        # padding_idx=0 : le vecteur pour index 0 est figé à 0 et n'est jamais
-        # mis à jour par le gradient → implémente le masquage MLM.
         self.embedding = nn.Embedding(
             num_embeddings=vocab_size,
             embedding_dim=embedding_dim,
             padding_idx=PAD_IDX,
         )
+
+        # ── Self-Attention (Transformer) ──────────────────────────────────────
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=4,
+            dim_feedforward=hidden_dim,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
 
         # ── Embedding de rôle ─────────────────────────────────────────────────
         self.role_embedding = nn.Embedding(5, 8)
@@ -280,8 +278,7 @@ class DraftModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
 
-            # Couche de sortie : logits sur tout le vocabulaire de champions
-            # (pas de Softmax → CrossEntropyLoss s'en charge)
+            # Couche de sortie : logits sur tout le vocabulaire
             nn.Linear(hidden_dim // 2, vocab_size),
         )
 
@@ -295,11 +292,19 @@ class DraftModel(nn.Module):
         Returns:
             logits : FloatTensor (B, vocab_size) — score brut par champion.
         """
-        embedded = self.embedding(x)    # (B, 20, embedding_dim)
-        embedded_flat = embedded.view(embedded.size(0), -1) # (B, 640)
+        # 1. Obtenir les embeddings de la séquence (B, 20, 32)
+        embedded = self.embedding(x)
         
+        # 2. Permettre aux champions de s'observer (Self-Attention)
+        attended = self.transformer(embedded) # (B, 20, 32)
+        
+        # 3. Aplatir le contexte enrichi
+        embedded_flat = attended.view(attended.size(0), -1) # (B, 640)
+        
+        # 4. Calculer le rôle
         role_embed = self.role_embedding(target_position) # (B, 8)
         
+        # 5. Injection globale et prise de décision
         combined = torch.cat((embedded_flat, target_win, role_embed), dim=1) # (B, 649)
         logits   = self.network(combined)   # (B, vocab_size)
         return logits
@@ -309,15 +314,6 @@ class DraftModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Retourne les k champions les plus probables pour chaque sample.
-
-        Args:
-            x : LongTensor (B, 20).
-            target_win : FloatTensor (B, 1).
-            target_position : LongTensor (B,).
-            k : Nombre de champions à retourner.
-
-        Returns:
-            (probabilities, indices) — chacun de shape (B, k).
         """
         with torch.no_grad():
             logits = self.forward(x, target_win, target_position)

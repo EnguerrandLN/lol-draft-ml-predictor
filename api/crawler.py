@@ -17,9 +17,9 @@ import logging
 import sqlite3
 from typing import Optional
 
-from api_client.client import RiotApiClient
+from api.client import RiotApiClient
 from config import MAX_MATCHES_PER_SUMMONER, RANKED_SOLO_QUEUE
-from database.repository import (
+from db.repository import (
     enqueue_puuids,
     get_match_count,
     get_pending_puuid,

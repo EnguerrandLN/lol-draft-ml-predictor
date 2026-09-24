@@ -27,11 +27,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv()
 
-from api_client.client import RiotApiClient
+from api.client import RiotApiClient
 from config import RANKED_SOLO_QUEUE
-from crawler.crawler import process_match
-from database.repository import match_exists, get_match_count
-from database.schema import init_db
+from api.crawler import process_match
+from db.repository import match_exists, get_match_count
+from db.schema import init_db
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
