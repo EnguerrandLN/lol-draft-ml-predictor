@@ -1,0 +1,8 @@
+# riot-draft-pipeline/.gitignore
+.env
+data/
+__pycache__/
+*.pyc
+*.db
+crawler.log
+.pytest_cache/
