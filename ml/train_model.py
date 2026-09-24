@@ -196,11 +196,13 @@ class DraftDataset(Dataset):
         targets_enc = np.vectorize(self.encoder.encode)(targets_raw)
         self.targets = torch.tensor(targets_enc, dtype=torch.long)
 
-        # ── Variable win (optionnelle) ────────────────────────────────────────
-        self.wins = torch.tensor(df["target_win"].values, dtype=torch.float32)
+        # ── Variable win (conditionnement) ────────────────────────────────────
+        self.wins = torch.tensor(df["target_win"].values, dtype=torch.float32).unsqueeze(1)
 
-        # ── Positions (pour analyse future) ──────────────────────────────────
-        self.positions = df["target_position"].values
+        # ── Position (Embedding de Rôle) ──────────────────────────────────────
+        ROLE_TO_IDX = {"TOP": 0, "JUNGLE": 1, "MIDDLE": 2, "BOTTOM": 3, "UTILITY": 4}
+        positions_idx = df["target_position"].map(ROLE_TO_IDX).fillna(0).astype(int).values
+        self.positions = torch.tensor(positions_idx, dtype=torch.long)
 
         log.info("  Dataset prêt : %d samples", len(self))
 
@@ -212,6 +214,7 @@ class DraftDataset(Dataset):
             "features": self.features[idx],   # (20,) LongTensor
             "target":   self.targets[idx],     # () LongTensor  (scalar)
             "win":      self.wins[idx],        # () FloatTensor (scalar)
+            "position": self.positions[idx],   # () LongTensor  (scalar)
         }
 
 
@@ -262,11 +265,12 @@ class DraftModel(nn.Module):
             padding_idx=PAD_IDX,
         )
 
+        # ── Embedding de rôle ─────────────────────────────────────────────────
+        self.role_embedding = nn.Embedding(5, 8)
+
         # ── Réseau Feed-Forward ───────────────────────────────────────────────
         self.network = nn.Sequential(
-            nn.Flatten(),                              # (B, 20, 32) → (B, 640)
-
-            nn.Linear(flat_dim, hidden_dim),
+            nn.Linear(flat_dim + 1 + 8, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -281,33 +285,42 @@ class DraftModel(nn.Module):
             nn.Linear(hidden_dim // 2, vocab_size),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, target_win: torch.Tensor, target_position: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x : LongTensor (B, 20) — IDs encodés des champions en contexte.
+            target_win : FloatTensor (B, 1) — condition de victoire.
+            target_position: LongTensor (B,) — entier du rôle cible.
 
         Returns:
             logits : FloatTensor (B, vocab_size) — score brut par champion.
         """
-        embedded = self.embedding(x)    # (B, 20) → (B, 20, embedding_dim)
-        logits   = self.network(embedded)   # (B, vocab_size)
+        embedded = self.embedding(x)    # (B, 20, embedding_dim)
+        embedded_flat = embedded.view(embedded.size(0), -1) # (B, 640)
+        
+        role_embed = self.role_embedding(target_position) # (B, 8)
+        
+        combined = torch.cat((embedded_flat, target_win, role_embed), dim=1) # (B, 649)
+        logits   = self.network(combined)   # (B, vocab_size)
         return logits
 
     def predict_top_k(
-        self, x: torch.Tensor, k: int = 5
+        self, x: torch.Tensor, target_win: torch.Tensor, target_position: torch.Tensor, k: int = 5
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Retourne les k champions les plus probables pour chaque sample.
 
         Args:
             x : LongTensor (B, 20).
+            target_win : FloatTensor (B, 1).
+            target_position : LongTensor (B,).
             k : Nombre de champions à retourner.
 
         Returns:
             (probabilities, indices) — chacun de shape (B, k).
         """
         with torch.no_grad():
-            logits = self.forward(x)
+            logits = self.forward(x, target_win, target_position)
             probs  = torch.softmax(logits, dim=-1)
         return torch.topk(probs, k=k, dim=-1)
 
@@ -335,11 +348,13 @@ def train_epoch(
     total_samples = 0
 
     for batch in loader:
-        features = batch["features"].to(device)   # (B, 20)
-        targets  = batch["target"].to(device)      # (B,)
+        features  = batch["features"].to(device)   # (B, 20)
+        wins      = batch["win"].to(device)        # (B, 1)
+        positions = batch["position"].to(device)   # (B,)
+        targets   = batch["target"].to(device)     # (B,)
 
         optimizer.zero_grad()
-        logits = model(features)                   # (B, vocab_size)
+        logits = model(features, wins, positions)                   # (B, vocab_size)
         loss   = criterion(logits, targets)
         loss.backward()
         # Gradient clipping : stabilise l'entraînement
@@ -368,9 +383,11 @@ def evaluate(
     total_samples = 0
 
     for batch in loader:
-        features = batch["features"].to(device)
-        targets  = batch["target"].to(device)
-        logits   = model(features)
+        features  = batch["features"].to(device)
+        wins      = batch["win"].to(device)
+        positions = batch["position"].to(device)
+        targets   = batch["target"].to(device)
+        logits    = model(features, wins, positions)
         loss     = criterion(logits, targets)
 
         total_loss    += loss.item() * len(targets)
@@ -462,9 +479,24 @@ def main() -> None:
         f"{n_params:,}",
     )
 
+    # ── Calcul des Poids de Classes (Class Weights) ───────────────────────────
+    # Corrige le déséquilibre (champions très populaires vs très rares)
+    log.info("Calcul des class weights pour rééquilibrer la Loss...")
+    frequencies = torch.bincount(dataset.targets, minlength=encoder.vocab_size).float()
+    
+    # Lissage par racine carrée (Square Root Smoothing) pour éviter la surcompensation
+    weights = 1.0 / torch.sqrt(frequencies + 1e-5)
+    weights[PAD_IDX] = 0.0 # PAD token n'a pas besoin de poids
+    
+    # Normalisation pour une moyenne à 1.0
+    valid_weights = weights[1:]
+    weights[1:] = valid_weights / valid_weights.mean()
+    
+    weights_tensor = weights.to(device)
+
     # ── Loss & Optimizer ──────────────────────────────────────────────────────
     # ignore_index=PAD_IDX : si un champion cible est 0 (inconnu), on l'ignore
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    criterion = nn.CrossEntropyLoss(weight=weights_tensor, ignore_index=PAD_IDX)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     # CosineAnnealingLR : décroissance douce sur toute la durée de l'entraînement.
     # Évite de tuer le LR prématurément (problème de ReduceLROnPlateau avec patience=2).
@@ -476,7 +508,11 @@ def main() -> None:
     log.info("Vérification du forward pass…")
     sample_batch = next(iter(train_loader))
     with torch.no_grad():
-        sample_out = model(sample_batch["features"].to(device))
+        sample_out = model(
+            sample_batch["features"].to(device),
+            sample_batch["win"].to(device),
+            sample_batch["position"].to(device)
+        )
     log.info(
         "  ✓ Forward pass OK : input %s → output %s",
         tuple(sample_batch["features"].shape),
@@ -536,7 +572,12 @@ def main() -> None:
         torch.load(args.model_out, map_location=device, weights_only=False)["model_state"]
     )
     sample = next(iter(val_loader))
-    probs, idxs = model.predict_top_k(sample["features"].to(device), k=5)
+    probs, idxs = model.predict_top_k(
+        sample["features"].to(device),
+        sample["win"].to(device),
+        sample["position"].to(device),
+        k=5
+    )
 
     print("\n  Top-5 prédictions (premier sample du val set)")
     print(f"  Cible réelle : {encoder.decode_name(sample['target'][0].item())}")
