@@ -4,5 +4,5 @@ data/
 __pycache__/
 *.pyc
 *.db
-crawler.log
+*.log
 .pytest_cache/
