@@ -1,8 +1,12 @@
 # riot-draft-pipeline/.gitignore
 .env
-data/
 __pycache__/
 *.pyc
 *.db
 *.log
 .pytest_cache/
+
+# Ignore heavy legacy datasets/models
+data/mlm_draft_dataset.csv
+data/draft_model.pt
+data/win_predictor_model.pt
