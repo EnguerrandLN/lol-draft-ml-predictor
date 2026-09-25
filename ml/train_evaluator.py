@@ -105,13 +105,28 @@ class DraftEvaluatorDataset(Dataset):
         wins_tensor = torch.tensor(df["target_win"].values, dtype=torch.float32)
         self.wins = wins_tensor[valid_rows]
         
+        import json
+        feature_file = DATA_DIR / "champion_features.json"
+        with open(feature_file, "r") as f:
+            champ_features_dict = json.load(f)
+            
+        self.num_features = len(next(iter(champ_features_dict.values())))
+        self.feature_lookup = torch.zeros((self.encoder.vocab_size, self.num_features), dtype=torch.float32)
+        
+        for riot_id_str, vec in champ_features_dict.items():
+            internal_idx = self.encoder.encode(int(riot_id_str))
+            if internal_idx != PAD_IDX:
+                self.feature_lookup[internal_idx] = torch.tensor(vec, dtype=torch.float32)
+                
         log.info("Dataset Evaluator prêt : %d samples (dont %d exclus car vides)", len(self), (~valid_rows).sum().item())
 
     def __len__(self) -> int:
         return len(self.wins)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.features[idx], self.wins[idx]
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        champ_ids = self.features[idx]
+        champ_feats = self.feature_lookup[champ_ids]
+        return champ_ids, champ_feats, self.wins[idx]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,17 +136,22 @@ class WinPredictorModel(nn.Module):
     def __init__(
         self,
         vocab_size:    int,
-        embedding_dim: int = 32,
+        embedding_dim: int = 64,
         hidden_dim:    int = 256,
         dropout:       float = 0.4,
         n_inputs:      int = 10,
+        num_features:  int = 11,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=PAD_IDX)
         
-        # ── Positional Embedding ──────────────────────────────────────────────
-        self.pos_embedding = nn.Embedding(n_inputs, embedding_dim)
+        # ── Role & Camp Embeddings ──────────────────────────────────────────────
+        self.role_embedding = nn.Embedding(5, embedding_dim)
+        self.camp_embedding = nn.Embedding(2, embedding_dim)
+        
+        # ── Projection Features Dense ─────────────────────────────────────────
+        self.input_projection = nn.Linear(embedding_dim * 2 + num_features, embedding_dim)
         self.pos_dropout = nn.Dropout(dropout)
         
         encoder_layer = nn.TransformerEncoderLayer(
@@ -159,22 +179,29 @@ class WinPredictorModel(nn.Module):
             nn.Linear(hidden_dim // 2, 1) # 1 seule sortie brute (sans Sigmoid)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 1. Base Champion Embedding
-        embedded = self.embedding(x)
+    def forward(self, ids: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+        # 1. Base Embeddings
+        emb_c = self.embedding(ids)
         
-        # 2. Positional Embedding (indispensable pour l'ordre des rôles)
-        positions = torch.arange(x.size(1), device=x.device).unsqueeze(0).expand_as(x)
-        embedded = embedded + self.pos_embedding(positions)
-        embedded = self.pos_dropout(embedded)
+        role_idx = torch.tensor([0, 1, 2, 3, 4, 0, 1, 2, 3, 4], device=ids.device).unsqueeze(0).expand_as(ids)
+        camp_idx = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1], device=ids.device).unsqueeze(0).expand_as(ids)
         
-        # 3. Création du masque d'attention pour ignorer les slots vides (PAD_IDX)
-        padding_mask = (x == PAD_IDX)
+        emb_p = self.role_embedding(role_idx) + self.camp_embedding(camp_idx)
         
-        # 4. Self-Attention
-        attended = self.transformer(embedded, src_key_padding_mask=padding_mask)
+        # 2. Concaténation (Champion Embed + Pos Embed + Dense Features)
+        raw_input = torch.cat([emb_c, emb_p, features], dim=-1)
         
-        # 5. Aplatissement et Décision finale
+        # 3. Projection vers la dimension du Transformer
+        x = torch.relu(self.input_projection(raw_input))
+        x = self.pos_dropout(x)
+        
+        # 4. Masque d'attention pour ignorer PAD_IDX
+        padding_mask = (ids == PAD_IDX)
+        
+        # 5. Transformer Encoder
+        attended = self.transformer(x, src_key_padding_mask=padding_mask)
+        
+        # 6. Aplatissement et Décision finale
         flat = attended.flatten(start_dim=1)
         return self.network(flat).squeeze(-1)
 
@@ -186,11 +213,11 @@ def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss, total_correct, total_samples = 0.0, 0, 0
     
-    for features, targets in loader:
-        features, targets = features.to(device), targets.to(device)
+    for ids, feats, targets in loader:
+        ids, feats, targets = ids.to(device), feats.to(device), targets.to(device)
         
         optimizer.zero_grad()
-        logits = model(features)
+        logits = model(ids, feats)
         loss = criterion(logits, targets.float())
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -208,9 +235,9 @@ def train_epoch(model, loader, optimizer, criterion, device):
 def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss, total_correct, total_samples = 0.0, 0, 0
-    for features, targets in loader:
-        features, targets = features.to(device), targets.to(device)
-        logits = model(features)
+    for ids, feats, targets in loader:
+        ids, feats, targets = ids.to(device), feats.to(device), targets.to(device)
+        logits = model(ids, feats)
         loss = criterion(logits, targets.float())
         
         total_loss += loss.item() * len(targets)
