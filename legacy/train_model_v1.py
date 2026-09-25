@@ -236,7 +236,7 @@ class DraftModel(nn.Module):
         vocab_size:    int,
         embedding_dim: int = 32,
         hidden_dim:    int = 256,
-        dropout:       float = 0.3,
+        dropout:       float = 0.4,
         n_inputs:      int = 20,
     ) -> None:
         super().__init__()
@@ -492,8 +492,11 @@ def main() -> None:
 
     # ── Loss & Optimizer ──────────────────────────────────────────────────────
     # ignore_index=PAD_IDX : si un champion cible est 0 (inconnu), on l'ignore
-    criterion = nn.CrossEntropyLoss(weight=weights_tensor, ignore_index=PAD_IDX)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss(weight=weights_tensor, ignore_index=PAD_IDX, label_smoothing=0.1)
+    
+    # AdamW est recommandé pour les Transformers avec un fort weight decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    
     # CosineAnnealingLR : décroissance douce sur toute la durée de l'entraînement.
     # Évite de tuer le LR prématurément (problème de ReduceLROnPlateau avec patience=2).
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
