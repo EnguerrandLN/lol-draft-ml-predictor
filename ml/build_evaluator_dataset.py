@@ -49,14 +49,19 @@ def build_evaluator_dataset():
     valid_match_ids = [m[0] for m in matches]
     log.info(f"{len(valid_match_ids)} matchs trouvés.")
 
-    query = f"""
+    query = """
         SELECT match_id, team_id, position, champion_id, win
         FROM participants
-        WHERE match_id IN ({','.join(['?']*len(valid_match_ids))})
+        WHERE match_id IN (
+            SELECT match_id 
+            FROM participants 
+            GROUP BY match_id 
+            HAVING count(*) = 10
+        )
     """
     
     log.info("Chargement des données en mémoire...")
-    df_participants = pd.read_sql_query(query, conn, params=valid_match_ids)
+    df_participants = pd.read_sql_query(query, conn)
     conn.close()
 
     dataset_rows = []
