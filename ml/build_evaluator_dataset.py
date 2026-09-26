@@ -13,7 +13,29 @@ from config import DATA_DIR, DB_PATH
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+def extract_role_counts():
+    import json
+    log.info("Extraction des fréquences de rôles (role_counts.json)...")
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT champion_id, position, count(*) FROM participants WHERE champion_id > 0 AND position IN ('TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'UTILITY') GROUP BY champion_id, position").fetchall()
+    
+    counts = {}
+    for cid, pos, count in rows:
+        if cid not in counts:
+            counts[cid] = {'TOP':0, 'JUNGLE':0, 'MIDDLE':0, 'BOTTOM':0, 'UTILITY':0}
+        counts[cid][pos] = count
+        
+    riot_to_role = {'TOP': 'Top', 'JUNGLE': 'Jungle', 'MIDDLE': 'Mid', 'BOTTOM': 'ADC', 'UTILITY': 'Support'}
+    final_counts = {str(cid): {riot_to_role[k]: v for k, v in pos_counts.items()} for cid, pos_counts in counts.items()}
+    
+    with open(DATA_DIR / "role_counts.json", "w") as f:
+        json.dump(final_counts, f, indent=4)
+    conn.close()
+    log.info(f"-> {len(final_counts)} champions sauvegardés dans role_counts.json.")
+
 def build_evaluator_dataset():
+    extract_role_counts()
+    
     conn = sqlite3.connect(DB_PATH)
     
     log.info("Récupération des matchs complets (10 joueurs)...")
