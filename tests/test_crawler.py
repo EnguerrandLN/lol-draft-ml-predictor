@@ -30,6 +30,12 @@ def make_match(match_id: str, early: bool = False) -> dict:
             "championId": i + 1,
             "win": i < 5,
             "gameEndedInEarlySurrender": early,
+            "damageSelfMitigated": 1000 + i,
+            "timeCCingOthers": 20 + i,
+            "totalTimeCCDealt": 100 + i,
+            "totalHeal": 500 + i,
+            "totalHealsOnTeammates": 50 + i,
+            "totalDamageShieldedOnTeammates": 30 + i,
         }
         for i in range(10)
     ]
@@ -89,6 +95,12 @@ class TestLadderCrawler(unittest.TestCase):
         self.assertEqual(rows["EUW1_gold-player"], ("GOLD", "II", 0))
         self.assertEqual(rows["EUW1_chall-player"], ("CHALLENGER", "I", 1))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM participants").fetchone()[0], 20)
+        support_stats = self.conn.execute(
+            """SELECT damage_self_mitigated, time_ccing_others, total_time_cc_dealt, total_heal,
+                      total_heals_on_teammates, total_damage_shielded_on_teammates
+               FROM participants WHERE puuid = 'EUW1_gold-player-p3'"""
+        ).fetchone()
+        self.assertEqual(tuple(support_stats), (1003, 23, 103, 503, 53, 33))
 
     @patch("api.crawler.time.sleep")
     def test_expired_key_does_not_burn_player(self, mock_sleep: MagicMock) -> None:
