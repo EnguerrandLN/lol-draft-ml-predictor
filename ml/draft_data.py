@@ -19,6 +19,15 @@ SIDES: tuple[str, ...] = ("blue", "red")
 TEAM_TO_SIDE: dict[int, str] = {100: "blue", 200: "red"}
 DRAFT_COLS: list[str] = [f"{side}_{role}" for side in SIDES for role in ROLES]
 
+# Tranches d'ELO : assez larges pour accumuler des matchs dans chacune
+TIER_BUCKETS: dict[str, tuple[str, ...]] = {
+    "LOW": ("IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM"),
+    "MID": ("EMERALD", "DIAMOND"),
+    "HIGH": ("MASTER", "GRANDMASTER", "CHALLENGER"),
+}
+TIER_BUCKET_LABELS: dict[str, str] = {"LOW": "Gold-Platine et moins", "MID": "Émeraude-Diamant", "HIGH": "Master+"}
+TIER_TO_BUCKET: dict[str, str] = {t: b for b, tiers in TIER_BUCKETS.items() for t in tiers}
+
 
 def connect_read_only(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Connexion en lecture seule : sûre pendant que le crawler écrit."""
