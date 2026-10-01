@@ -67,6 +67,7 @@ class DraftState:
     enemy: dict[str, int] = field(default_factory=dict)
     bans: set[int] = field(default_factory=set)
     ally_side: Optional[str] = None  # "blue" / "red" / None si inconnu
+    tier: Optional[str] = None       # Tranche d'ELO (LOW / MID / HIGH) ou None si inconnue
 
     def unavailable(self) -> set[int]:
         return set(self.ally.values()) | set(self.enemy.values()) | self.bans
@@ -100,10 +101,14 @@ class DraftRecommender:
             self.duo[(r1, r2)] = {}
             self.duo[(r2, r1)] = {}  # Même effet, indexé depuis l'autre rôle
 
+        tier_dev: dict[str, dict[str, dict[int, float]]] = {}
         for key, eff in model.effects.items():
             parts = key.split("|")
             if parts[0] == "m":
                 self.main[parts[1]][int(parts[2])] = eff
+            elif parts[0] == "t":
+                bucket, role, champ = parts[1], parts[2], int(parts[3])
+                tier_dev.setdefault(bucket, {r: {} for r in ROLES})[role][champ] = eff
             elif parts[0] == "l":
                 role, lo, hi = parts[1], int(parts[2]), int(parts[3])
                 self.lane[role].setdefault(lo, {})[hi] = eff
@@ -112,6 +117,15 @@ class DraftRecommender:
                 r1, r2, c1, c2 = parts[1], parts[2], int(parts[3]), int(parts[4])
                 self.duo[(r1, r2)].setdefault(c1, {})[c2] = eff
                 self.duo[(r2, r1)].setdefault(c2, {})[c1] = eff
+
+        # Force champion × rôle effective par tranche d'ELO : effet global + écart de la tranche
+        self._mains: dict[Optional[str], dict[str, dict[int, float]]] = {None: self.main}
+        for bucket, dev in tier_dev.items():
+            self._mains[bucket] = {
+                r: {c: self.main[r].get(c, 0.0) + dev[r].get(c, 0.0) for c in set(self.main[r]) | set(dev[r])}
+                for r in ROLES
+            }
+        self.calibration: dict[str, float] = model.meta.get("tier_calibration", {})
 
         # Sensibilité de chaque champion au profil de dégâts adverse (groupe « comp »)
         self.damage = model.damage
@@ -142,8 +156,13 @@ class DraftRecommender:
 
     # ── Termes du logit ──────────────────────────────────────────────────────
 
-    def _main_term(self, role: str, dist: Dist) -> float:
-        return sum(p * self.main[role].get(c, 0.0) for c, p in dist.items())
+    def _main_term(self, role: str, dist: Dist, tier: Optional[str] = None) -> float:
+        main = self._mains.get(tier, self.main)[role]
+        return sum(p * main.get(c, 0.0) for c, p in dist.items())
+
+    def calibration_scale(self, tier: Optional[str]) -> float:
+        """Facteur appliqué au logit de la draft pour une tranche d'ELO (1 si inconnue)."""
+        return self.calibration.get(tier, 1.0) if tier else 1.0
 
     def _lane_term(self, role: str, ally: Dist, enemy: Dist) -> float:
         total = 0.0
@@ -206,7 +225,7 @@ class DraftRecommender:
         return self._balance(*self._ad_moments(dists, "ally")) - self._balance(*self._ad_moments(dists, "enemy"))
 
     def expected_logit(self, dists: dict[tuple[str, str], Dist], ally_side: Optional[str],
-                       include_balance: bool = True) -> float:
+                       include_balance: bool = True, tier: Optional[str] = None) -> float:
         """
         Espérance du logit (point de vue allié). Une distribution vide annule ses
         termes linéaires. L'équilibre d'équipe n'étant pas linéaire, il n'a de sens
@@ -216,8 +235,8 @@ class DraftRecommender:
         side = {"blue": 1.0, "red": -1.0}.get(ally_side or "", 0.0)
         logit = side * self.model.intercept
         for role in ROLES:
-            logit += self._main_term(role, dists[("ally", role)])
-            logit -= self._main_term(role, dists[("enemy", role)])
+            logit += self._main_term(role, dists[("ally", role)], tier)
+            logit -= self._main_term(role, dists[("enemy", role)], tier)
             logit += self._lane_term(role, dists[("ally", role)], dists[("enemy", role)])
         for r1, r2 in DUO_PAIRS:
             logit += self._duo_term(r1, r2, dists[("ally", r1)], dists[("ally", r2)])
@@ -225,9 +244,9 @@ class DraftRecommender:
         logit += self._comp_term(dists)
         return logit + self._balance_term(dists) if include_balance else logit
 
-    def _own_terms(self, team: str, role: str, champ: int, dists) -> float:
+    def _own_terms(self, team: str, role: str, champ: int, dists, tier: Optional[str] = None) -> float:
         """Force propre + synergies d'un champion placé dans (team, role), signe allié."""
-        total = self.main[role].get(champ, 0.0)
+        total = self._mains.get(tier, self.main)[role].get(champ, 0.0)
         for r1, r2 in DUO_PAIRS:
             if role in (r1, r2):
                 partner = r2 if role == r1 else r1
@@ -237,7 +256,8 @@ class DraftRecommender:
 
     def draft_win_prob(self, state: DraftState) -> float:
         """Probabilité de victoire de ton équipe pour la draft telle quelle (slots vides en espérance)."""
-        return sigmoid(self.expected_logit(self._slot_dists(state), state.ally_side))
+        logit = self.expected_logit(self._slot_dists(state), state.ally_side, tier=state.tier)
+        return sigmoid(self.calibration_scale(state.tier) * logit)
 
     # ── Recommandation ───────────────────────────────────────────────────────
 
@@ -265,7 +285,7 @@ class DraftRecommender:
         """
         state = DraftState(
             ally={r: c for r, c in state.ally.items() if r != role},
-            enemy=dict(state.enemy), bans=set(state.bans), ally_side=state.ally_side,
+            enemy=dict(state.enemy), bans=set(state.bans), ally_side=state.ally_side, tier=state.tier,
         )
         dists = self._slot_dists(state)
         enemy_dist: Dist = dists[("enemy", role)]
@@ -273,7 +293,7 @@ class DraftRecommender:
 
         # B : draft sans le slot allié ni le slot ennemi du rôle
         base_dists = {**dists, ("ally", role): {}, ("enemy", role): {}}
-        B = self.expected_logit(base_dists, state.ally_side, include_balance=False)
+        B = self.expected_logit(base_dists, state.ally_side, include_balance=False, tier=state.tier)
 
         # Termes de composition : sommes sur les 4 autres slots de chaque équipe.
         # L'équilibre de ton équipe ne dépend que de c (et des autres slots) : il va
@@ -294,7 +314,7 @@ class DraftRecommender:
             cross = lambda c, e: 0.0
 
         # E(e) pour chaque vis-à-vis possible
-        E = {e: self._own_terms("enemy", role, e, dists) + comp_e(e) for e in enemy_dist}
+        E = {e: self._own_terms("enemy", role, e, dists, state.tier) + comp_e(e) for e in enemy_dist}
         E_mean = sum(p * E[e] for e, p in enemy_dist.items())
         share_mean = sum(p * self._share(e) for e, p in enemy_dist.items())
         comp_mean = sum(p * self.comp.get(e, 0.0) for e, p in enemy_dist.items())
@@ -306,7 +326,7 @@ class DraftRecommender:
 
         def logit_expected(c: int) -> tuple[float, float]:
             """(logit attendu, terme de paire P(c, e) attendu) pour le candidat c."""
-            A = self._own_terms("ally", role, c, dists) + comp_a(c)
+            A = self._own_terms("ally", role, c, dists, state.tier) + comp_a(c)
             # Le vis-à-vis ne peut pas être c : on retire c de sa distribution
             pc = enemy_dist.get(c, 0.0)
             norm = 1.0 - pc
@@ -320,7 +340,9 @@ class DraftRecommender:
             x_part = (self.comp.get(c, 0.0) * sh - th * self._share(c)) * k
             return B + A + e_part + l_part + x_part, l_part + x_part
 
-        avg_logit = sum(p * logit_expected(c)[0] for c, p in population.items())
+        # Calibration de la tranche d'ELO : les effets de draft y pèsent plus ou moins
+        scale = self.calibration_scale(state.tier)
+        avg_logit = scale * sum(p * logit_expected(c)[0] for c, p in population.items())
 
         games = self.model.games[role]
         unavailable = state.unavailable()
@@ -331,16 +353,17 @@ class DraftRecommender:
 
         results = []
         for c in candidates:
-            exp_logit, expected_pair = logit_expected(c)
-            delta = (personal or {}).get(c, 0.0)
-            exp_logit += delta
+            draft_logit, expected_pair = logit_expected(c)
             row = lane_row.get(c, {})
             worst_pair, worst_e = expected_pair, None
             for e in responses:
                 pair = row.get(e, 0.0) + cross(c, e)
                 if e != c and pair < worst_pair:
                     worst_pair, worst_e = pair, e
-            worst_logit = exp_logit - expected_pair + worst_pair
+            # Le décalage personnel est mesuré directement en logit : il n'est pas recalibré
+            delta = (personal or {}).get(c, 0.0)
+            exp_logit = scale * draft_logit + delta
+            worst_logit = scale * (draft_logit - expected_pair + worst_pair) + delta
             score = (1 - risk) * exp_logit + risk * worst_logit
             results.append(Recommendation(
                 champion_id=c,
@@ -399,6 +422,8 @@ def main() -> None:
     p.add_argument("--pool", nargs="*", default=None, metavar="Champion",
                    help="Limiter aux champions que tu joues.")
     p.add_argument("--side", choices=["blue", "red"], default=None)
+    p.add_argument("--tier", choices=["LOW", "MID", "HIGH"], default=None,
+                   help="Ta tranche : LOW = Gold-Platine et moins, MID = Émeraude-Diamant, HIGH = Master+.")
     p.add_argument("--min-games", type=int, default=50)
     p.add_argument("--risk", type=float, default=0.0,
                    help="0 = proba attendue, 1 = proba si contré.")
@@ -413,6 +438,7 @@ def main() -> None:
         enemy=parse_slots(args.enemy, rec.names),
         bans={resolve_champion(b, rec.names) for b in args.bans},
         ally_side=args.side,
+        tier=args.tier,
     )
     pool = {resolve_champion(c, rec.names) for c in args.pool} if args.pool else None
 

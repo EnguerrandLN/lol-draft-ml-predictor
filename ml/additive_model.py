@@ -17,6 +17,10 @@ additive_model.py — Modèle additif régularisé de victoire en draft.
            les parties : estimable bien avant les matchups paire par paire.
   - bal  : équilibre des dégâts de chaque équipe, b_lin·z + b_sq·z² sur la part AD
            de l'équipe (bleu − rouge). Une équipe full AD ou full AP perd ~5 pts.
+  - tier : écart de force champion × rôle propre à une tranche d'ELO (Gold-Platine,
+           Émeraude-Diamant, Master+), ajouté à « main » pour les matchs dont le tier
+           est connu. Fortement atténué vers 0 : il ne s'écarte de l'effet global que
+           si la tranche fournit assez de matchs pour le justifier.
 
 L'encodage est antisymétrique (bleu +1, rouge −1) : échanger les équipes inverse
 exactement la prédiction, hors avantage de côté.
@@ -40,10 +44,10 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from ml.draft_data import ROLES
+from ml.draft_data import ROLES, TIER_TO_BUCKET
 
 DUO_PAIRS: tuple[tuple[str, str], ...] = (("BOTTOM", "UTILITY"), ("JUNGLE", "MIDDLE"), ("JUNGLE", "TOP"))
-GROUPS: tuple[str, ...] = ("main", "lane", "duo", "comp", "bal")
+GROUPS: tuple[str, ...] = ("main", "lane", "duo", "comp", "bal", "tier")
 BALANCE_KEYS: tuple[str, str] = ("b|lin", "b|sq")
 
 
@@ -53,6 +57,10 @@ BALANCE_KEYS: tuple[str, str] = ("b|lin", "b|sq")
 
 def main_key(role: str, champ: int) -> str:
     return f"m|{role}|{champ}"
+
+
+def tier_key(bucket: str, role: str, champ: int) -> str:
+    return f"t|{bucket}|{role}|{champ}"
 
 
 def lane_key(role: str, a: int, b: int) -> tuple[str, float]:
@@ -136,6 +144,19 @@ def draft_terms(
             c2 = df[f"{side}_{r2}"].astype(int).to_numpy()
             add([duo_key(r1, r2, a, b) for a, b in zip(c1, c2)], np.full(n, sign), "duo")
 
+    if "source_tier" in df.columns:
+        buckets = df.source_tier.map(TIER_TO_BUCKET).to_numpy()
+        tagged = pd.notna(buckets)
+        if tagged.any():
+            rows_t = rows_idx[tagged]
+            for role in ROLES:
+                for side, sign in (("blue", 1.0), ("red", -1.0)):
+                    champs = df[f"{side}_{role}"].astype(int).to_numpy()[tagged]
+                    rows.append(rows_t)
+                    keys.append(np.array([tier_key(b, role, c) for b, c in zip(buckets[tagged], champs)], dtype=object))
+                    vals.append(np.full(len(rows_t), sign))
+                    groups.append(np.full(len(rows_t), "tier", dtype=object))
+
     if damage is not None:
         z_blue, z_red = damage.z(damage.team_ad(df, "blue")), damage.z(damage.team_ad(df, "red"))
         for role in ROLES:
@@ -165,11 +186,12 @@ class Hyperparams:
     duo_scale: float = 0.0
     comp_scale: float = 0.0
     bal_scale: float = 0.0
+    tier_scale: float = 0.0
     half_life_days: float | None = None
 
     def scales(self) -> dict[str, float]:
         return {"main": 1.0, "lane": self.lane_scale, "duo": self.duo_scale,
-                "comp": self.comp_scale, "bal": self.bal_scale}
+                "comp": self.comp_scale, "bal": self.bal_scale, "tier": self.tier_scale}
 
 
 @dataclass
@@ -283,56 +305,109 @@ class AdditiveDraftModel:
         )
 
 
-# ── Sensibilités au profil adverse : sélection parcimonieuse ──────────────────
+# ── Sensibilités au profil adverse : lissage bayésien empirique ───────────────
 
-def fit_sparse_comp(
-    model: AdditiveDraftModel, df: pd.DataFrame, fdr: float = 0.1,
-) -> tuple[dict[str, float], pd.DataFrame]:
+def comp_slopes_by_period(model: AdditiveDraftModel, df: pd.DataFrame, n_periods: int = 4) -> pd.DataFrame:
     """
-    Estime, pour chaque champion, sa sensibilité au profil de dégâts adverse
-    (effet « comp ») à partir des résidus du modèle, et ne garde que les effets
-    statistiquement établis.
+    Pente de chaque champion (sensibilité au profil de dégâts adverse) estimée
+    séparément sur `n_periods` blocs chronologiques de taille égale.
 
-    Pourquoi pas la L2 du groupe « comp » : la plupart des champions n'ont aucune
-    sensibilité de ce type, quelques-uns en ont une forte (Malphite, Kassadin...).
-    Une pénalité L2 commune suppose des effets petits et répartis : elle écrase
-    les vrais effets forts. Ici :
-      1. pente par champion = Σ résidu·z / Σ p(1−p)·z²  (un pas de Newton depuis 0),
-         erreur type = 1/√(Σ p(1−p)·z²) ;
-      2. sélection par Benjamini-Hochberg au taux de fausses découvertes `fdr` ;
-      3. atténuation James-Stein des pentes retenues : b·(1 − se²/b²).
+    Pente = Σ résidu·z / Σ p(1−p)·z² (un pas de Newton depuis 0), variance = 1/Σ p(1−p)·z².
 
     Returns:
-        (effets à ajouter au modèle, tableau de diagnostic par champion)
+        DataFrame indexé par (champion, période) : colonnes S, I (somme du score
+        et information de Fisher), n.
     """
-    from scipy.stats import norm
-
     dmg = model.damage
     p_blue = model.predict_proba(df)
     z_blue, z_red = dmg.z(dmg.team_ad(df, "blue")), dmg.z(dmg.team_ad(df, "red"))
     res_blue = df.blue_win.to_numpy() - p_blue
     info_w = p_blue * (1 - p_blue)
+    order = np.argsort(df.game_creation.to_numpy(), kind="stable")
+    period = np.empty(len(df), dtype=int)
+    for k, idx in enumerate(np.array_split(order, n_periods)):
+        period[idx] = k
 
     parts = []
     for role in ROLES:
         # Un champion bleu fait face au profil rouge, et inversement (résidu vu de son équipe)
-        parts.append(pd.DataFrame({"c": df[f"blue_{role}"].to_numpy(), "s": res_blue * z_red, "i": info_w * z_red ** 2}))
-        parts.append(pd.DataFrame({"c": df[f"red_{role}"].to_numpy(), "s": -res_blue * z_blue, "i": info_w * z_blue ** 2}))
-    stats = pd.concat(parts).groupby("c").agg(S=("s", "sum"), I=("i", "sum"), n=("s", "size"))
-    stats = stats[stats.I > 0]
-    stats["slope"] = stats.S / stats.I
-    stats["se"] = 1 / np.sqrt(stats.I)
-    stats["p_value"] = 2 * norm.sf(np.abs(stats.slope / stats.se))
+        parts.append(pd.DataFrame({"c": df[f"blue_{role}"].to_numpy(), "t": period,
+                                   "s": res_blue * z_red, "i": info_w * z_red ** 2}))
+        parts.append(pd.DataFrame({"c": df[f"red_{role}"].to_numpy(), "t": period,
+                                   "s": -res_blue * z_blue, "i": info_w * z_blue ** 2}))
+    per = pd.concat(parts).groupby(["c", "t"]).agg(S=("s", "sum"), I=("i", "sum"), n=("s", "size"))
+    return per[per.I > 0]
 
-    # Benjamini-Hochberg : plus grand rang k tel que p_(k) ≤ k/m · fdr
-    ranked = stats.sort_values("p_value")
-    m = len(ranked)
-    passing = np.nonzero(ranked.p_value.to_numpy() <= np.arange(1, m + 1) / m * fdr)[0]
-    selected = set(ranked.index[: passing.max() + 1]) if len(passing) else set()
 
-    stats["selected"] = stats.index.isin(selected)
-    stats["effect"] = np.where(
-        stats.selected, stats.slope * np.clip(1 - stats.se ** 2 / stats.slope ** 2, 0, 1), 0.0
+def fit_comp_effects(
+    model: AdditiveDraftModel, df: pd.DataFrame, n_periods: int = 4,
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """
+    Sensibilité de chaque champion au profil de dégâts adverse, lissée selon la
+    force des preuves. Aucun seuil, aucun choix par champion : trois étapes
+    calculées sur les 173 champions à la fois.
+
+    1. Stabilité dans le temps (méta-analyse à effets aléatoires, DerSimonian-Laird) :
+       les pentes par période b_ct sont combinées en supposant qu'un vrai effet
+       peut dériver d'une période à l'autre avec une variance ω², mesurée sur
+       l'ensemble des champions. Une dérive fréquente augmente l'incertitude de
+       tous ; un champion dont l'effet change de signe obtient une pente
+       combinée faible et incertaine.
+    2. Lissage bayésien empirique (mélange « pas d'effet / vrai effet ») :
+          vrai effet θ_c = 0 avec probabilité 1 − π, θ_c ~ N(0, τ²) sinon.
+       π et τ sont estimés par maximum de vraisemblance sur toutes les pentes.
+    3. Effet retenu = poids × b, avec poids = P(vrai effet | données) · τ² / (τ² + se²)
+       (moyenne a posteriori) : les preuves fortes passent presque entières,
+       les faibles partiellement, le bruit tombe à ~0. Le poids reste bien
+       défini même quand les données ne montrent aucun effet (τ → 0, poids → 0),
+       contrairement à P(vrai effet) seule, qui devient alors arbitraire.
+
+    Returns:
+        (effets à ajouter au modèle, tableau par champion trié par |effet| ;
+        attrs : pi, tau, omega)
+    """
+    from scipy.optimize import minimize
+    from scipy.stats import norm
+
+    per = comp_slopes_by_period(model, df, n_periods)
+    per["b"] = per.S / per.I
+
+    # 1. Variance de dérive ω² entre périodes, poolée sur tous les champions
+    g = per.groupby(level="c")
+    w_sum = g.I.sum()
+    b_fixed = g.S.sum() / w_sum                      # Σ w·b / Σ w, avec w = I et w·b = S
+    q = (per.I * (per.b - b_fixed.reindex(per.index, level="c")) ** 2).groupby(level="c").sum()
+    dof = g.size() - 1
+    c_term = w_sum - (per.I ** 2).groupby(level="c").sum() / w_sum
+    omega2 = max(0.0, float((q.sum() - dof.sum()) / c_term[dof > 0].sum())) if c_term[dof > 0].sum() > 0 else 0.0
+
+    w_re = 1 / (1 / per.I + omega2)
+    stats = pd.DataFrame({
+        "slope": (w_re * per.b).groupby(level="c").sum() / w_re.groupby(level="c").sum(),
+        "se": 1 / np.sqrt(w_re.groupby(level="c").sum()),
+        "n": g.n.sum(),
+    })
+
+    # 2. Mélange : maximum de vraisemblance sur (π, τ)
+    b, s2 = stats.slope.to_numpy(), stats.se.to_numpy() ** 2
+
+    def neg_loglik(params):
+        pi, tau2 = 1 / (1 + np.exp(-params[0])), np.exp(params[1])
+        like = (1 - pi) * norm.pdf(b, 0, np.sqrt(s2)) + pi * norm.pdf(b, 0, np.sqrt(tau2 + s2))
+        return -np.sum(np.log(like + 1e-300))
+
+    best = min(
+        (minimize(neg_loglik, x0, method="Nelder-Mead") for x0 in ([-2.0, np.log(0.01)], [0.0, np.log(0.003)])),
+        key=lambda r: r.fun,
     )
-    effects = {comp_key(int(c)): float(e) for c, e in stats.effect.items() if e != 0.0}
-    return effects, stats.sort_values("p_value")
+    pi, tau2 = float(1 / (1 + np.exp(-best.x[0]))), float(np.exp(best.x[1]))
+
+    # 3. Moyenne a posteriori
+    real = pi * norm.pdf(b, 0, np.sqrt(tau2 + s2))
+    null = (1 - pi) * norm.pdf(b, 0, np.sqrt(s2))
+    stats["weight"] = real / (real + null) * tau2 / (tau2 + s2)
+    stats["effect"] = stats.weight * b
+    stats.attrs.update(pi=pi, tau=float(np.sqrt(tau2)), omega=float(np.sqrt(omega2)))
+
+    effects = {comp_key(int(c)): float(e) for c, e in stats.effect.items() if abs(e) > 1e-6}
+    return effects, stats.reindex(stats.effect.abs().sort_values(ascending=False).index)

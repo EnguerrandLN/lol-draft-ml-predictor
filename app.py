@@ -20,7 +20,7 @@ from config import DATA_DIR
 from db.schema import init_db
 from ml.additive_model import AdditiveDraftModel
 from ml.display_names import load_champion_display
-from ml.draft_data import ROLES, connect_read_only
+from ml.draft_data import ROLES, TIER_BUCKET_LABELS, connect_read_only
 from ml.personal import ChampionProfile, fetch_history, player_profile
 from ml.recommend import DraftRecommender, DraftState
 
@@ -73,6 +73,15 @@ with st.sidebar:
     )
 
     st.header("Paramètres")
+    tier = st.selectbox(
+        "Ton niveau", [None] + list(TIER_BUCKET_LABELS),
+        format_func=lambda b: "Non précisé" if b is None else TIER_BUCKET_LABELS[b],
+        help="Les forces de champions et le poids de la draft varient selon le niveau : le modèle "
+             "applique les écarts propres à ta tranche quand les données les établissent.",
+    )
+    if tier and rec.calibration_scale(tier) != 1.0:
+        st.caption(f"À ce niveau, les effets de draft mesurés pèsent ×{rec.calibration_scale(tier):.2f} "
+                   "par rapport à la moyenne des niveaux.")
     min_games = st.slider(
         "Matchs minimum au rôle", 0, 1000, 50, 10,
         help="Masque les champions trop rarement joués à ce rôle : leur estimation est peu fiable.",
@@ -213,9 +222,10 @@ if profiles:
         own_pool = st.radio(
             "Champions proposés", ["Tous", "Seulement ceux que je joue"], horizontal=True,
             help="« Tous » permet de découvrir un champion fort dans cette situation : ton historique "
-                 "s'affiche en colonnes et ajuste les champions que tu joues déjà. Un champion jamais "
-                 "joué n'a pas de bonus perso, mais les premières parties sur un nouveau champion "
-                 "coûtent en général quelques points (non mesuré ici).",
+                 "s'affiche en colonnes et ajuste les champions que tu joues déjà. Mesuré sur la "
+                 "base : un champion absent de tes ~20 dernières parties coûte ~1 à 1,5 pt par "
+                 "rapport à ton main, à niveau de joueur égal. Le coût d'une toute première "
+                 "partie n'est pas mesurable sans données de maîtrise.",
         ) == "Seulement ceux que je joue"
         if own_pool:
             min_own_games = st.slider("…avec au moins N parties à ce rôle", 1, 20, 3)
@@ -228,7 +238,7 @@ if duplicates:
     st.error(f"Champion(s) sélectionné(s) plusieurs fois : {', '.join(duplicates)}.")
     st.stop()
 
-state = DraftState(ally=ally_picks, enemy=enemy_picks, bans=set(bans), ally_side=side)
+state = DraftState(ally=ally_picks, enemy=enemy_picks, bans=set(bans), ally_side=side, tier=tier)
 
 
 # ── Recommandations ───────────────────────────────────────────────────────────

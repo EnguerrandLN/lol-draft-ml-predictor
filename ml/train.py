@@ -29,8 +29,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import DATA_DIR
-from ml.additive_model import AdditiveDraftModel, Hyperparams, fit_sparse_comp
-from ml.draft_data import ROLES, load_champion_ad_share, load_champion_names, load_matches, load_player_slots
+from ml.additive_model import AdditiveDraftModel, Hyperparams, fit_comp_effects
+from ml.draft_data import (
+    ROLES, TIER_BUCKET_LABELS, TIER_TO_BUCKET, load_champion_ad_share, load_champion_names, load_matches,
+    load_player_slots,
+)
 from ml.personal import estimate_tau, residuals
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
@@ -41,9 +44,53 @@ TIER_ORDER = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMON
 C_GRID = (0.003, 0.01, 0.03, 0.1)
 SCALE_GRID = (0.0, 0.15, 0.3, 0.5, 1.0)
 HALF_LIFE_GRID = (None, 60, 30, 14)
+# Amélioration minimale de log-loss de validation pour ajouter de la complexité :
+# en dessous, l'écart est du bruit de sélection (vu sur les écarts par ELO : 0.00001).
+MIN_IMPROVEMENT = 5e-5
 
 
 # ── Métriques ─────────────────────────────────────────────────────────────────
+
+def estimate_tier_calibration(
+    df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
+    n_folds: int = 5, prior_sd: float = 0.5, min_matches: int = 300,
+) -> dict[str, dict[str, float]]:
+    """
+    Pente de calibration par tranche d'ELO, mesurée hors échantillon.
+
+    Chaque fold de matchs étiquetés est prédit par un modèle entraîné sur tout
+    le reste (non étiquetés + autres folds). Par tranche, la régression
+    logistique de l'issue sur le logit prédit donne une pente ŝ (1 = effets de
+    draft bien dosés ; 0.5 = deux fois trop forts à ce niveau), d'erreur type se.
+    Elle est atténuée vers 1 avec un a priori N(1, prior_sd²) :
+        s = 1 + (ŝ − 1) · prior_sd² / (prior_sd² + se²)
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import KFold
+
+    tagged = df[df.source_tier.map(TIER_TO_BUCKET).notna()]
+    untagged = df.drop(tagged.index)
+    if len(tagged) < min_matches:
+        return {}
+    oos_logit = pd.Series(np.nan, index=tagged.index)
+    for train_idx, test_idx in KFold(n_folds, shuffle=True, random_state=0).split(tagged):
+        train = pd.concat([untagged, tagged.iloc[train_idx]]).sort_values("game_creation")
+        fold = tagged.iloc[test_idx]
+        oos_logit.loc[fold.index] = AdditiveDraftModel.fit(train, hp, ad_share).predict_logit(fold)
+
+    out = {}
+    for bucket, g in tagged.groupby(tagged.source_tier.map(TIER_TO_BUCKET)):
+        if len(g) < min_matches:
+            continue
+        x = oos_logit.loc[g.index].to_numpy()
+        clf = LogisticRegression(C=1e6).fit(x.reshape(-1, 1), g.blue_win.to_numpy())
+        slope = float(clf.coef_[0][0])
+        p = clf.predict_proba(x.reshape(-1, 1))[:, 1]
+        se = float(1 / np.sqrt(np.sum(p * (1 - p) * x ** 2)))
+        weight = prior_sd ** 2 / (prior_sd ** 2 + se ** 2)
+        out[bucket] = {"scale": 1 + (slope - 1) * weight, "raw_slope": slope, "se": se, "n": len(g)}
+    return out
+
 
 def log_losses(y: np.ndarray, p: np.ndarray) -> np.ndarray:
     p = np.clip(p, 1e-9, 1 - 1e-9)
@@ -92,32 +139,63 @@ def tune(df: pd.DataFrame, ad_share: dict[int, float], n_folds: int = 3, block: 
     best = Hyperparams()
     best_ll = float("inf")
 
-    def try_grid(param: str, grid) -> None:
+    def try_grid(param: str, grid, min_gain: float = MIN_IMPROVEMENT) -> None:
+        """Parcimonie : les grilles commencent par la valeur la plus simple (0 / None), et
+        une autre valeur n'est retenue que si elle améliore la validation d'au moins `min_gain`."""
         nonlocal best, best_ll
         for value in grid:
             hp = Hyperparams(**{**best.__dict__, param: value})
             ll = cv_log_loss(folds, hp, ad_share)
             marker = ""
-            if ll < best_ll - 1e-6:
+            if ll < best_ll - min_gain:
                 best, best_ll, marker = hp, ll, "  ★"
             log.info("  %-15s = %-6s → log-loss %.5f%s", param, value, ll, marker)
 
-    try_grid("C", C_GRID)
+    try_grid("C", C_GRID, min_gain=1e-6)
     try_grid("bal_scale", SCALE_GRID)
+    try_grid("tier_scale", SCALE_GRID)
     # Les sensibilités par champion (« comp ») ne passent pas par la L2 : elles sont
-    # sélectionnées après coup par fit_sparse_comp (voir sa docstring).
+    # lissées après coup par fit_comp_effects, puis adoptées ou non par decide_comp.
     try_grid("lane_scale", SCALE_GRID)
     try_grid("duo_scale", SCALE_GRID)
     try_grid("half_life_days", HALF_LIFE_GRID)
-    try_grid("C", C_GRID)  # Re-vérifier C une fois les autres groupes fixés
+    try_grid("C", C_GRID, min_gain=1e-6)  # Re-vérifier C une fois les autres groupes fixés
 
     log.info("Retenu : %s (log-loss val %.5f, gain vs constante %.5f)", best, best_ll, const - best_ll)
     return best
 
 
+def with_comp(model: AdditiveDraftModel, train: pd.DataFrame) -> AdditiveDraftModel:
+    """Copie du modèle enrichie des sensibilités par champion lissées, estimées sur `train`."""
+    effects, _ = fit_comp_effects(model, train)
+    return AdditiveDraftModel(model.intercept, {**model.effects, **effects}, model.hyperparams, damage=model.damage)
+
+
+def decide_comp(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
+                n_folds: int = 3, block: float = 0.1) -> dict:
+    """
+    Les sensibilités par champion améliorent-elles les prédictions sur des parties
+    futures ? Même validation glissante que le réglage : elles ne sont adoptées
+    que si le gain moyen de log-loss sur les blocs de validation est positif.
+    """
+    if hp.bal_scale <= 0 and hp.comp_scale <= 0:
+        return {"adopted": False, "gain": 0.0, "ci95": 0.0}
+    diffs = []
+    for train, val in rolling_folds(df, n_folds, block):
+        base = AdditiveDraftModel.fit(train, hp, ad_share)
+        y = val.blue_win.to_numpy()
+        diffs.append(log_losses(y, base.predict_proba(val)) - log_losses(y, with_comp(base, train).predict_proba(val)))
+    d = np.concatenate(diffs)
+    gain, ci = float(d.mean()), float(1.96 * d.std(ddof=1) / np.sqrt(len(d)))
+    log.info("Sensibilités par champion en validation glissante : gain %+.5f ± %.5f → %s",
+             gain, ci, "adoptées" if gain > 0 else "non adoptées")
+    return {"adopted": gain > 0, "gain": gain, "ci95": ci}
+
+
 # ── Rapport sur le test ───────────────────────────────────────────────────────
 
-def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float]) -> dict:
+def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
+           use_comp: bool) -> dict:
     y = test.blue_win.to_numpy()
     n = len(y)
     p_const = np.full(n, train.blue_win.mean())
@@ -129,18 +207,17 @@ def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: d
           f"{pd.to_datetime(test.game_creation.max(), unit='ms').date()})\n{'═' * 78}")
     print(f"{'Modèle':<34} {'Log-loss':>9} {'Gain vs const (IC 95%)':>24} {'Brier':>7} {'Acc':>13}")
 
-    def fitted(params: Hyperparams, sparse_comp: bool = False) -> AdditiveDraftModel:
-        model = AdditiveDraftModel.fit(train, params, ad_share)
-        if sparse_comp and model.damage is not None:
-            model.effects.update(fit_sparse_comp(model, train)[0])
-        return model
-
+    base = AdditiveDraftModel.fit(train, hp, ad_share)
     candidates = {
         "Constante (winrate bleu)": None,
-        "Effets champion×rôle seuls": lambda: fitted(Hyperparams(C=hp.C, half_life_days=hp.half_life_days)),
-        "Sans sensibilités par champion": lambda: fitted(hp),
-        "Modèle retenu": lambda: fitted(hp, sparse_comp=True),
+        "Effets champion×rôle seuls": lambda: AdditiveDraftModel.fit(
+            train, Hyperparams(C=hp.C, half_life_days=hp.half_life_days), ad_share),
+        "Sans sensibilités par champion": lambda: base,
     }
+    if base.damage is not None:
+        candidates["Avec sensibilités lissées"] = lambda: with_comp(base, train)
+    retained = "Avec sensibilités lissées" if use_comp else "Sans sensibilités par champion"
+
     for label, build in candidates.items():
         p = p_const if build is None else build().predict_proba(test)
         ll = log_losses(y, p)
@@ -152,8 +229,10 @@ def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: d
               f"{((p - y) ** 2).mean():>7.4f} {acc:>7.2%} ±{acc_ci:.1%}")
         results[label] = {"log_loss": float(ll.mean()), "gain": float(gain.mean()),
                           "gain_ci95": float(half_ci), "accuracy": float(acc)}
-        if label == "Modèle retenu":
+        if label == retained:
             p_model = p
+            results["Modèle retenu"] = results[label]
+    print(f"→ Modèle retenu : « {retained} »")
 
     # Calibration : quand le modèle annonce X %, l'équipe gagne-t-elle X % du temps ?
     print("\nCalibration du modèle retenu (déciles de probabilité prédite) :")
@@ -179,14 +258,17 @@ def print_top_effects(model: AdditiveDraftModel, min_games: int = 200) -> None:
         print(f"{role:<8} ▲ {', '.join(fmt(r) for r in rows[::-1][:4])}")
         print(f"{'':<8} ▼ {', '.join(fmt(r) for r in rows[:4])}")
 
-    candidates = model.meta.get("comp_candidates", [])
-    if candidates:
-        print("\nSensibilité au profil de dégâts adverse (pente en logit par écart-type de part AD,")
-        print("+ = meilleur contre une équipe AD). Retenus = significatifs après correction (FDR 10 %) :")
-        for c in candidates[:10]:
-            mark = "✔ retenu" if c["selected"] else ""
-            print(f"  {names.get(str(c['champion_id']), c['champion_id']):<12} {c['slope']:+.3f}  "
-                  f"p = {c['p_value']:.4f}  {mark}")
+    comp = model.meta.get("comp", {})
+    if comp.get("candidates"):
+        prior = comp["prior"]
+        print(f"\nSensibilité au profil de dégâts adverse ({'ADOPTÉE' if comp['adopted'] else 'non adoptée'} : "
+              f"gain en validation {comp['validation_gain']:+.5f}).")
+        print(f"Part estimée de champions à effet réel {prior['pi']:.0%}, ampleur typique {prior['tau']:.3f}, "
+              f"dérive entre périodes {prior['omega']:.3f}. Pente en logit par écart-type de part AD")
+        print("(+ = meilleur contre une équipe AD) ; effet = pente × part retenue (preuve × fiabilité) :")
+        for c in comp["candidates"][:12]:
+            print(f"  {names.get(str(c['champion_id']), c['champion_id']):<12} pente {c['slope']:+.3f} ± "
+                  f"{1.96 * c['se']:.3f}  part retenue {c['weight']:.0%}  → effet {c['effect']:+.3f}")
 
     b_lin, b_sq = (model.effects.get(k, 0.0) for k in ("b|lin", "b|sq"))
     if b_lin or b_sq:
@@ -227,18 +309,26 @@ def main() -> None:
 
     ad_share = load_champion_ad_share()
     hp = tune(train_full, ad_share)
-    results = report(train_full, test, hp, ad_share)
+    comp_decision = decide_comp(train_full, hp, ad_share)
+    results = report(train_full, test, hp, ad_share, use_comp=comp_decision["adopted"])
 
     log.info("Entraînement final sur les %d matchs...", len(df))
     model = AdditiveDraftModel.fit(df, hp, ad_share)
     comp_stats = None
     if model.damage is not None:
-        comp_effects, comp_stats = fit_sparse_comp(model, df)
-        model.effects.update(comp_effects)
+        comp_effects, comp_stats = fit_comp_effects(model, df)
+        if comp_decision["adopted"]:
+            model.effects.update(comp_effects)
     model.attach_stats(df, load_champion_names())
     # Écart réel entre joueurs sur un même champion : a priori de la personnalisation
     personal_tau = estimate_tau(residuals(model, df, load_player_slots()))
     log.info("τ personnel mesuré : %.3f logit", personal_tau)
+
+    log.info("Calibration par tranche d'ELO (validation croisée sur les matchs étiquetés)...")
+    tier_calibration = estimate_tier_calibration(df, hp, ad_share)
+    for bucket, c in tier_calibration.items():
+        log.info("  %-22s pente hors échantillon %.2f ± %.2f (n=%d) → facteur retenu %.2f",
+                 TIER_BUCKET_LABELS[bucket], c["raw_slope"], 1.96 * c["se"], c["n"], c["scale"])
 
     model.meta = {
         "n_matches": len(df),
@@ -247,12 +337,20 @@ def main() -> None:
         "patches": df.patch.value_counts().to_dict(),
         "test_results": results,
         "personal_tau": personal_tau,
-        # Sensibilités au profil adverse les plus marquées, retenues ou non (transparence)
-        "comp_candidates": [] if comp_stats is None else [
-            {"champion_id": int(c), "slope": float(r.slope), "p_value": float(r.p_value),
-             "selected": bool(r.selected)}
-            for c, r in comp_stats.head(15).iterrows()
-        ],
+        "tier_calibration": {b: c["scale"] for b, c in tier_calibration.items()},
+        "tier_calibration_detail": tier_calibration,
+        # Sensibilités au profil adverse : décision, a priori estimé et champions les mieux établis
+        "comp": {} if comp_stats is None else {
+            "adopted": comp_decision["adopted"],
+            "validation_gain": comp_decision["gain"],
+            "validation_ci95": comp_decision["ci95"],
+            "prior": dict(comp_stats.attrs),
+            "candidates": [
+                {"champion_id": int(c), "slope": float(r.slope), "se": float(r.se),
+                 "weight": float(r.weight), "effect": float(r.effect)}
+                for c, r in comp_stats.head(20).iterrows()
+            ],
+        },
     }
     model.save(Path(args.out))
     print_top_effects(model)
