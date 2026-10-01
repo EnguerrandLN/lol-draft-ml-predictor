@@ -25,6 +25,11 @@ RANKED_FLEX_QUEUE: int = 440    # Ranked Flex
 
 # ── Crawler ──────────────────────────────────────────────────────────────────
 MAX_MATCHES_PER_SUMMONER: int = 20  # Nombre de matchs récupérés par joueur
+CRAWL_TIERS: tuple[str, ...] = (    # Tiers échantillonnés dans le ladder
+    "GOLD", "PLATINUM", "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER",
+)
+LADDER_PAGES_PER_DIVISION: int = 3  # ~205 joueurs par page
+CRAWL_DAYS_BACK: int = 30           # Fenêtre de parties collectées
 MAX_RETRIES: int = 3                # Tentatives max avant abandon (erreurs 5xx)
 INITIAL_BACKOFF_S: float = 1.0      # Backoff initial (doublé à chaque retry)
 REQUEST_TIMEOUT_S: int = 15         # Timeout par requête HTTP

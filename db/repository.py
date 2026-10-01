@@ -21,7 +21,12 @@ def match_exists(conn: sqlite3.Connection, match_id: str) -> bool:
     return cur.fetchone() is not None
 
 
-def upsert_match(conn: sqlite3.Connection, match_data: dict) -> None:
+def upsert_match(
+    conn: sqlite3.Connection,
+    match_data: dict,
+    source_tier: Optional[str] = None,
+    source_division: Optional[str] = None,
+) -> None:
     """
     Insère les métadonnées d'un match.
     Ignore silencieusement les doublons (idempotent).
@@ -29,16 +34,22 @@ def upsert_match(conn: sqlite3.Connection, match_data: dict) -> None:
     Args:
         conn: Connexion SQLite active.
         match_data: Réponse brute de l'endpoint Match-V5.
+        source_tier: Tier du joueur du ladder par lequel le match a été trouvé.
+        source_division: Division de ce joueur (I..IV).
     """
     info: dict = match_data["info"]
     winning_team: Optional[int] = next(
         (t["teamId"] for t in info.get("teams", []) if t.get("win")), None
     )
+    ended_early: int = int(
+        any(p.get("gameEndedInEarlySurrender") for p in info.get("participants", []))
+    )
     conn.execute(
         """
         INSERT OR IGNORE INTO matches
-            (match_id, game_version, queue_id, game_duration, platform_id, game_creation, winning_team)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (match_id, game_version, queue_id, game_duration, platform_id, game_creation,
+             winning_team, ended_early, source_tier, source_division)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             match_data["metadata"]["matchId"],
@@ -48,6 +59,9 @@ def upsert_match(conn: sqlite3.Connection, match_data: dict) -> None:
             info.get("platformId"),
             info.get("gameCreation"),
             winning_team,
+            ended_early,
+            source_tier,
+            source_division,
         ),
     )
 
@@ -170,52 +184,48 @@ def upsert_summoner(
     )
 
 
-# ── Crawl Queue ───────────────────────────────────────────────────────────────
+# ── Ladder ────────────────────────────────────────────────────────────────────
 
-def enqueue_puuids(conn: sqlite3.Connection, puuids: list[str]) -> int:
+def upsert_ladder_players(conn: sqlite3.Connection, players: list[dict]) -> None:
     """
-    Ajoute des PUUIDs à la file d'attente BFS (ignore les doublons).
+    Insère / rafraîchit des joueurs du ladder et les remet en 'pending'.
+    `last_crawled_at` est conservé : un joueur déjà vu ne sera interrogé que
+    sur ses parties jouées depuis.
 
-    Returns:
-        Nombre de nouveaux PUUIDs effectivement ajoutés.
+    Args:
+        players: dicts avec puuid, tier, division, league_points, priority.
     """
-    added = 0
-    for puuid in puuids:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO crawl_queue (puuid, status) VALUES (?, 'pending')",
-            (puuid,),
-        )
-        added += cur.rowcount
-    return added
-
-
-def get_pending_puuid(conn: sqlite3.Connection) -> Optional[str]:
-    """
-    Dépile le prochain PUUID 'pending' par ordre d'insertion (FIFO).
-
-    Returns:
-        Un PUUID ou None si la file est vide.
-    """
-    cur = conn.execute(
-        "SELECT puuid FROM crawl_queue WHERE status = 'pending' ORDER BY enqueued_at LIMIT 1"
-    )
-    row = cur.fetchone()
-    return row["puuid"] if row else None
-
-
-def mark_puuid_done(conn: sqlite3.Connection, puuid: str) -> None:
-    """Marque un PUUID comme traité avec succès."""
-    conn.execute(
-        "UPDATE crawl_queue SET status = 'done', processed_at = CURRENT_TIMESTAMP WHERE puuid = ?",
-        (puuid,),
+    conn.executemany(
+        """
+        INSERT INTO ladder_players (puuid, tier, division, league_points, status, priority)
+        VALUES (:puuid, :tier, :division, :league_points, 'pending', :priority)
+        ON CONFLICT(puuid) DO UPDATE SET
+            tier          = excluded.tier,
+            division      = excluded.division,
+            league_points = excluded.league_points,
+            status        = 'pending',
+            priority      = excluded.priority,
+            snapshot_at   = CURRENT_TIMESTAMP
+        """,
+        players,
     )
 
 
-def mark_puuid_error(conn: sqlite3.Connection, puuid: str) -> None:
-    """Marque un PUUID en erreur (ne sera pas re-traité automatiquement)."""
+def get_next_ladder_player(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    """Prochain joueur 'pending' (ordre aléatoire fixé à l'enfilement), ou None."""
+    return conn.execute(
+        """
+        SELECT puuid, tier, division, last_crawled_at FROM ladder_players
+        WHERE status = 'pending' ORDER BY priority LIMIT 1
+        """
+    ).fetchone()
+
+
+def mark_ladder_player_done(conn: sqlite3.Connection, puuid: str, crawled_at: int) -> None:
+    """Marque un joueur traité ; `crawled_at` (epoch s) borne la prochaine passe."""
     conn.execute(
-        "UPDATE crawl_queue SET status = 'error', processed_at = CURRENT_TIMESTAMP WHERE puuid = ?",
-        (puuid,),
+        "UPDATE ladder_players SET status = 'done', last_crawled_at = ? WHERE puuid = ?",
+        (crawled_at, puuid),
     )
 
 
@@ -227,9 +237,9 @@ def get_match_count(conn: sqlite3.Connection) -> int:
     return cur.fetchone()[0]
 
 
-def get_queue_stats(conn: sqlite3.Connection) -> dict[str, int]:
-    """Retourne les compteurs de la crawl_queue par statut."""
+def get_ladder_stats(conn: sqlite3.Connection) -> dict[str, int]:
+    """Retourne les compteurs de ladder_players par statut."""
     cur = conn.execute(
-        "SELECT status, COUNT(*) AS cnt FROM crawl_queue GROUP BY status"
+        "SELECT status, COUNT(*) AS cnt FROM ladder_players GROUP BY status"
     )
     return {row["status"]: row["cnt"] for row in cur.fetchall()}

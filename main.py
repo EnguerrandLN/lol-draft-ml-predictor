@@ -1,40 +1,55 @@
 """
-main.py — Point d'entrée CLI du pipeline de collecte Riot Draft.
+main.py — Point d'entrée CLI du crawler de matchs Ranked Solo.
+
+Le crawler échantillonne des joueurs dans le ladder (par tier/division) et
+collecte leurs parties récentes. Il tourne en continu par passes successives
+et reprend automatiquement là où il s'était arrêté (état en base).
 
 Usage :
-  # Résolution d'un Riot ID en PUUID puis crawl
-  python main.py --riot-id KeytedLN#EUW --max-matches 5
+  # Crawl continu avec les paramètres par défaut (config.py)
+  python main.py
 
-  # Avec un PUUID direct (si déjà connu)
-  python main.py --puuid <PUUID> --max-matches 100
+  # Uniquement le haut elo, sur les 14 derniers jours
+  python main.py --tiers EMERALD DIAMOND MASTER GRANDMASTER CHALLENGER --days-back 14
 
-  # Mode debug avec logs détaillés
-  python main.py --riot-id KeytedLN#EUW --max-matches 5 --log-level DEBUG
+  # S'arrêter à 200 000 matchs en base
+  python main.py --max-matches 200000
+
+Clé API : lue dans .env (RIOT_API_KEY=RGAPI-...). Si elle expire en cours de
+route, le crawler se met en pause et reprend dès que .env contient une
+nouvelle clé — inutile de le relancer.
 """
 import argparse
-import io
 import logging
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 # Assurer que le répertoire courant est dans le PATH Python
 sys.path.insert(0, str(Path(__file__).parent))
 
-load_dotenv()
+ENV_PATH: Path = Path(__file__).parent / ".env"
+load_dotenv(ENV_PATH)
 
 from api.client import RiotApiClient
-from api.crawler import DraftCrawler
+from api.crawler import ALL_TIERS, LadderCrawler
+from config import (
+    CRAWL_DAYS_BACK,
+    CRAWL_TIERS,
+    LADDER_PAGES_PER_DIVISION,
+    MAX_MATCHES_PER_SUMMONER,
+)
 from db.schema import init_db
 
 
 def setup_logging(level: str = "INFO") -> None:
     """
-    Configure le logging vers la console ET un fichier crawler.log.
+    Configure le logging vers la console ET crawler.log (rotation 10 Mo x 3).
 
     Args:
         level: Niveau de log (DEBUG, INFO, WARNING, ERROR).
@@ -43,63 +58,62 @@ def setup_logging(level: str = "INFO") -> None:
     fmt = "%(asctime)s [%(levelname)-8s] %(name)s - %(message)s"
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
-    # Force UTF-8 sur stdout/stderr pour eviter les erreurs cp1252 sous Windows
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("crawler.log", encoding="utf-8"),
+        RotatingFileHandler(
+            "crawler.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        ),
     ]
 
     logging.basicConfig(level=log_level, format=fmt, datefmt=date_fmt, handlers=handlers)
 
-    # Réduire le bruit des bibliothèques externes
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Réduire le bruit des bibliothèques externes (les retries transport
+    # d'urllib3 sont normaux ; seuls les échecs persistants sont loggés)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("requests").setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Riot Draft Data Crawler — Collecte de matchs LoL Ranked Solo",
+        description="Riot Draft Data Crawler — Collecte de matchs LoL Ranked Solo par ladder",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--riot-id",
-        type=str,
-        metavar="NAME#TAG",
-        help="Riot ID du joueur seed (ex: KeytedLN#EUW). Résolu via Account-V1.",
+    parser.add_argument(
+        "--tiers",
+        nargs="+",
+        default=list(CRAWL_TIERS),
+        type=str.upper,
+        choices=ALL_TIERS,
+        metavar="TIER",
+        help=f"Tiers à échantillonner parmi : {' '.join(ALL_TIERS)}.",
     )
-    group.add_argument(
-        "--puuid",
-        type=str,
-        metavar="PUUID",
-        help="PUUID du joueur seed (alternative à --riot-id).",
+    parser.add_argument(
+        "--pages-per-division",
+        type=int,
+        default=LADDER_PAGES_PER_DIVISION,
+        metavar="N",
+        help="Pages League-V4 (~205 joueurs) lues par division à chaque passe.",
+    )
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=CRAWL_DAYS_BACK,
+        metavar="N",
+        help="Ne collecter que les parties des N derniers jours.",
+    )
+    parser.add_argument(
+        "--matches-per-player",
+        type=int,
+        default=MAX_MATCHES_PER_SUMMONER,
+        metavar="N",
+        help="Nombre max de parties demandées par joueur et par passe (max 100).",
     )
     parser.add_argument(
         "--max-matches",
         type=int,
-        default=100,
+        default=0,
         metavar="N",
-        help="Nombre cible de matchs à collecter.",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help=(
-            "Reprend le crawl depuis la queue existante sans résoudre de nouveau joueur seed. "
-            "Utile après une interruption (clé expirée, Ctrl+C...)."
-        ),
-    )
-    parser.add_argument(
-        "--months-back",
-        type=int,
-        default=6,
-        metavar="N",
-        help="Ne collecter que les matchs des N derniers mois (0 = pas de limite).",
+        help="S'arrêter quand la base contient N matchs (0 = crawl continu).",
     )
     parser.add_argument(
         "--log-level",
@@ -111,18 +125,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def read_api_key_from_env_file() -> Optional[str]:
+    """Relit .env sur disque (la clé peut avoir été remplacée pendant le crawl)."""
+    key: str = (dotenv_values(ENV_PATH).get("RIOT_API_KEY") or "").strip()
+    return key if key.startswith("RGAPI-") else None
+
+
 def print_db_summary(conn: sqlite3.Connection) -> None:
     """Affiche un resume structure du contenu de la base."""
     logger = logging.getLogger(__name__)
 
     queries = {
-        "Matchs":        "SELECT COUNT(*) FROM matches",
-        "Participants":  "SELECT COUNT(*) FROM participants",
-        "Bans":          "SELECT COUNT(*) FROM bans",
-        "Joueurs vus":   "SELECT COUNT(*) FROM summoner_cache",
-        "Queue done":    "SELECT COUNT(*) FROM crawl_queue WHERE status='done'",
-        "Queue error":   "SELECT COUNT(*) FROM crawl_queue WHERE status='error'",
-        "Queue pending": "SELECT COUNT(*) FROM crawl_queue WHERE status='pending'",
+        "Matchs":            "SELECT COUNT(*) FROM matches",
+        "Matchs (remakes)":  "SELECT COUNT(*) FROM matches WHERE ended_early = 1",
+        "Matchs avec tier":  "SELECT COUNT(*) FROM matches WHERE source_tier IS NOT NULL",
+        "Ladder pending":    "SELECT COUNT(*) FROM ladder_players WHERE status='pending'",
+        "Ladder done":       "SELECT COUNT(*) FROM ladder_players WHERE status='done'",
     }
 
     sep = "+" + "-" * 38 + "+"
@@ -136,6 +154,12 @@ def print_db_summary(conn: sqlite3.Connection) -> None:
 
 
 def main() -> None:
+    # Force UTF-8 sur stdout/stderr pour eviter les erreurs cp1252 sous Windows
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     args = parse_args()
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
@@ -149,71 +173,20 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ── Calcul du filtre temporel ─────────────────────────────────────────
-    start_time: int | None = None
-    if args.months_back > 0:
-        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=args.months_back * 30)
-        start_time = int(cutoff_dt.timestamp())
-        logger.info(
-            "Filtre temporel : matchs depuis le %s (%d mois en arrière)",
-            cutoff_dt.strftime("%Y-%m-%d"),
-            args.months_back,
-        )
-
     # ── Initialisation ────────────────────────────────────────────────────
     logger.info("Initialisation de la base de données...")
     conn: sqlite3.Connection = init_db()
 
     client: RiotApiClient = RiotApiClient(api_key=api_key)
-    crawler: DraftCrawler = DraftCrawler(conn=conn, client=client, start_time=start_time)
-
-    # ── Résolution du joueur seed (ignorée en mode --resume) ─────────────
-    if args.resume:
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM crawl_queue WHERE status='pending'"
-        ).fetchone()[0]
-        done = conn.execute(
-            "SELECT COUNT(*) FROM crawl_queue WHERE status='done'"
-        ).fetchone()[0]
-        if pending == 0:
-            logger.error(
-                "Mode --resume : aucun joueur en attente dans la queue. "
-                "Lancez d'abord avec --riot-id pour initialiser le seed."
-            )
-            sys.exit(1)
-        logger.info(
-            "Mode --resume : reprise depuis la queue existante "
-            "(%d pending | %d done).", pending, done
-        )
-    else:
-        seed_puuid: str = args.puuid or ""
-
-        if not seed_puuid and args.riot_id:
-            try:
-                game_name, tag_line = args.riot_id.split("#", 1)
-            except ValueError:
-                logger.error(
-                    "Format Riot ID invalide : '%s'. Attendu : GameName#TAG", args.riot_id
-                )
-                sys.exit(1)
-
-            logger.info("Résolution du Riot ID : %s#%s ...", game_name, tag_line)
-            account: dict | None = client.get_account_by_riot_id(game_name, tag_line)
-            if not account:
-                logger.error(
-                    "Impossible de résoudre '%s#%s'. Vérifiez le Riot ID et la région.",
-                    game_name, tag_line,
-                )
-                sys.exit(1)
-
-            seed_puuid = account["puuid"]
-            logger.info("PUUID résolu : %s", seed_puuid)
-
-        if not seed_puuid:
-            logger.error("Fournissez --riot-id, --puuid, ou --resume pour démarrer le crawl.")
-            sys.exit(1)
-
-        crawler.seed(seed_puuid)
+    crawler = LadderCrawler(
+        conn=conn,
+        client=client,
+        tiers=args.tiers,
+        pages_per_division=args.pages_per_division,
+        days_back=args.days_back,
+        matches_per_player=args.matches_per_player,
+        reload_api_key=read_api_key_from_env_file,
+    )
 
     # ── Lancement du crawler ──────────────────────────────────────────────
     crawler.run(max_matches=args.max_matches)
