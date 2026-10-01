@@ -112,10 +112,10 @@ with col3:
 st.divider()
 
 st.sidebar.header("⚙️ Paramètres")
-C = st.sidebar.slider(
-    "Facteur de Confiance (C)", 
-    min_value=10, max_value=500, value=50, step=10, 
-    help="Shrinkage paramétrique : tire la probabilité vers 50% si le champion est très rare à ce poste."
+min_games = st.sidebar.slider(
+    "Parties minimum requises", 
+    min_value=0, max_value=5000, value=100, step=50, 
+    help="Masque les champions qui ont été joués moins de X fois à ce poste dans ton dataset."
 )
 
 # ─── LOGIQUE D'ÉVALUATION (FORCE BRUTE) ───────────────────────────────────────
@@ -171,20 +171,22 @@ if st.button("🚀 Évaluer toutes les combinaisons possibles", use_container_wi
         logits = model(batch_tensor, batch_feats)   # Shape: (Batch,) grace au squeeze(-1)
         probs = torch.sigmoid(logits)               # Shape: (Batch,)
         
-    # 5. Application du Shrinkage Paramétrique
+    # 5. Filtrage des champions exotiques
     role_counts_db = get_champion_role_counts()
     results = []
     
     for i, cid in enumerate(valid_cids):
-        prob_brute = probs[i].item()
-        
         N = role_counts_db.get(cid, {}).get(target_role, 0)
         
-        prob_finale = (N * prob_brute + C * 0.5) / (N + C)
+        # On ignore le champion s'il n'a pas été joué assez de fois à ce poste
+        if N < min_games:
+            continue
+            
+        prob_brute = probs[i].item()
         
         results.append({
             "cid": cid,
-            "prob_finale": prob_finale,
+            "prob_finale": prob_brute,
             "prob_brute": prob_brute,
             "N": N
         })
