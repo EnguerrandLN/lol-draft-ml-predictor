@@ -1,5 +1,5 @@
 """
-api_client/client.py — Client HTTP sécurisé pour l'API Riot Games.
+api/client.py — Client HTTP sécurisé pour l'API Riot Games.
 
 Fonctionnalités clés :
   - Rate limiting proactif par host (europe / euw1 ont des quotas séparés) :
