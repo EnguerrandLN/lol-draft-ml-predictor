@@ -23,10 +23,20 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
   bon pick apporte typiquement 1 à 4 points de winrate.
 - **Bien estimé** : la force de chaque champion à chaque rôle, et l'équilibre
   des dégâts d'une équipe (une composition full AD ou full AP perd ~7 points).
+- **Sensibilités propres à un champion** (« Malphite contre une équipe AD »,
+  « Galio contre une équipe AP ») : chaque champion reçoit sa pente pondérée par
+  la force des preuves et leur stabilité dans le temps (lissage bayésien
+  empirique, sans seuil ni réglage par champion). Le poids grandit avec les
+  données ; la couche n'est adoptée que si elle améliore la validation.
+- **Selon le niveau** : en Master+, les effets de draft appris sont environ
+  deux fois trop forts ; l'app atténue les probabilités quand tu indiques ton
+  niveau. Des écarts de force par tranche d'ELO s'activeront avec plus de
+  matchs étiquetés.
 - **Encore faible** : les matchups de lane et les synergies (trop peu de
-  parties par paire de champions), et les sensibilités propres à un champion
-  (« Malphite contre une équipe AD ») : seules celles qui sont statistiquement
-  établies sont retenues, et la liste s'allonge avec les données.
+  parties par paire de champions : aucun gain mesurable jusqu'à 50k matchs).
+
+Détail des expériences (courbe d'apprentissage, niveaux, frontline, coût d'un
+champion hors pool) : [`experiments/RESULTS.md`](experiments/RESULTS.md).
 
 ## Structure
 
@@ -51,6 +61,7 @@ ml/
 data/
   additive_model.json  Modèle entraîné (versionné : l'app fonctionne sans la base)
   draft.db             Base SQLite des matchs (non versionnée)
+experiments/         Expériences reproductibles et leurs résultats (RESULTS.md)
 tests/               Tests unitaires (pytest)
 ```
 
@@ -75,8 +86,8 @@ RIOT_API_KEY=RGAPI-...
 python -m streamlit run app.py
 ```
 
-Renseigne les picks des deux équipes, les bans et le rôle à pourvoir. Dans la
-barre latérale, ton Riot ID importe ton historique : les champions que tu joues
+Renseigne les picks des deux équipes, les bans et le rôle à pourvoir, et ton
+niveau dans la barre latérale. Ton Riot ID importe ton historique : les champions que tu joues
 reçoivent un bonus ou malus personnel (fortement atténué tant que tu as peu de
 parties), et tu peux te limiter à ton pool.
 
@@ -108,7 +119,7 @@ nouveau modèle automatiquement. À relancer régulièrement pendant le crawl.
 **Recommandation en ligne de commande**
 
 ```bash
-python ml/recommend.py --role ADC --ally SUPPORT=Braum --enemy MID=Zed --bans Jinx --side red
+python ml/recommend.py --role ADC --ally SUPPORT=Braum --enemy MID=Zed --bans Jinx --side red --tier MID
 ```
 
 **Tests**
@@ -126,6 +137,7 @@ logit P(victoire) = avantage de côté
                   + synergies bot / jungle-mid / jungle-top
                   + équilibre des dégâts de l'équipe
                   + sensibilité de certains champions au profil adverse
+                  + écarts de force par tranche d'ELO      (quand les données les établissent)
 ```
 
 Chaque groupe d'effets a sa propre force de régularisation, choisie par
