@@ -101,6 +101,12 @@ class DraftEvaluatorDataset(Dataset):
         valid_rows = (features_tensor != PAD_IDX).any(dim=1)
         self.features = features_tensor[valid_rows]
         
+        # Conserver les match_ids pour le GroupShuffleSplit
+        if 'match_id' in df.columns:
+            self.match_ids = df['match_id'].values[valid_rows.numpy()]
+        else:
+            self.match_ids = None
+        
         # Cible mathématique : probabilité de victoire (0.0 ou 1.0)
         wins_tensor = torch.tensor(df["target_win"].values, dtype=torch.float32)
         self.wins = wins_tensor[valid_rows]
@@ -280,7 +286,19 @@ def main():
     
     n_val = int(len(dataset) * args.val_split)
     n_train = len(dataset) - n_val
-    train_set, val_set = random_split(dataset, [n_train, n_val])
+    
+    if hasattr(dataset, 'match_ids') and dataset.match_ids is not None:
+        from sklearn.model_selection import GroupShuffleSplit
+        log.info("Création du split basé sur GroupShuffleSplit (match_id)...")
+        gss = GroupShuffleSplit(n_splits=1, test_size=args.val_split, random_state=args.seed)
+        # Using a dummy X since we only need train/val indices based on groups
+        dummy_X = np.zeros(len(dataset))
+        train_idx, val_idx = next(gss.split(dummy_X, groups=dataset.match_ids))
+        train_set = torch.utils.data.Subset(dataset, train_idx)
+        val_set = torch.utils.data.Subset(dataset, val_idx)
+    else:
+        log.warning("ATTENTION : match_id introuvable. Utilisation de random_split (risque de fuite de données) !")
+        train_set, val_set = random_split(dataset, [n_train, n_val])
     
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     val_loader   = DataLoader(val_set,   batch_size=args.batch_size, shuffle=False)

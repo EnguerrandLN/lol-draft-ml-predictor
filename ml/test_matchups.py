@@ -8,7 +8,7 @@ from config import DATA_DIR
 from ml.train_evaluator import PAD_IDX, WinPredictorModel
 
 def test():
-    model_path = DATA_DIR / "win_predictor.pt"
+    model_path = DATA_DIR / "model_flatten_1618.pt"
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     
     model = WinPredictorModel(
