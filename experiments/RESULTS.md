@@ -119,6 +119,33 @@ n'est pas une régression du modèle : la fenêtre de test est désormais 100 %
 patch 16.19 (l'entraînement est surtout en 16.18/16.17) et à 28 % Master+, où
 la draft prédit peu (gain −0,001). En Émeraude-Diamant, le gain reste ~+0,003.
 
+## 7. Synergies et counters « par ressemblance » (`factorization_machine.py`) — négatif
+
+Question : faut-il passer à un réseau de neurones ? Son seul apport par rapport
+au modèle additif est d'apprendre des interactions entre champions. Test de
+l'idée centrale (des embeddings de champions) sous forme contrainte : une
+factorization machine donne à chaque champion de petits vecteurs (k = 2 à 8)
+dont on déduit toutes les synergies (⟨v_a, v_b⟩) et tous les counters
+(⟨u_a, w_b⟩ − ⟨u_b, w_a⟩). Elle apprend sur les résidus du modèle actuel ;
+k et la régularisation sont réglés en validation interne avec arrêt précoce.
+
+Gain de log-loss sur des parties futures, par rapport au modèle additif seul (75k matchs) :
+
+| Variante | Fenêtre récente | Fenêtre précédente |
+|---|---|---|
+| Synergies | −0,00003 ± 0,00003 | −0,00019 ± 0,00024 |
+| Counters | +0,00003 ± 0,00040 | −0,00007 ± 0,00023 |
+| Les deux | +0,00005 ± 0,00033 | −0,00002 ± 0,00041 |
+
+- Aucun gain : les petits gains de validation (+0,0001 à +0,0003) ne se
+  transfèrent pas, et l'arrêt précoce coupe l'apprentissage après 1 à 30 époques.
+- Les paires apprises changent d'une fenêtre à l'autre (Jinx/Caitlyn d'un côté,
+  Darius/Xayah de l'autre) : du bruit, pas une structure stable.
+- **Conclusion : à ~75k matchs, il n'y a pas d'interaction exploitable au-delà
+  de ce que le modèle capture déjà (dont l'équilibre AD/AP). Un réseau de
+  neurones, plus flexible et moins régularisé, n'en trouverait pas davantage.**
+  À refaire quand le volume aura nettement augmenté.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
