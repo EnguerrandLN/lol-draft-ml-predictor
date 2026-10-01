@@ -5,7 +5,7 @@ Lancement :
   streamlit run app.py
 
 Le modèle est lu depuis data/additive_model.json (produit par
-ml/train_additive.py) et rechargé automatiquement s'il est réentraîné.
+ml/train.py) et rechargé automatiquement s'il est réentraîné.
 """
 import sys
 from pathlib import Path
@@ -45,7 +45,7 @@ def load_display(internal_names: tuple[tuple[int, str], ...]) -> dict[int, dict]
 
 
 if not MODEL_PATH.exists():
-    st.error(f"Modèle introuvable : {MODEL_PATH}. Lance d'abord `python ml/train_additive.py`.")
+    st.error(f"Modèle introuvable : {MODEL_PATH}. Lance d'abord `python ml/train.py`.")
     st.stop()
 
 rec = load_recommender(MODEL_PATH.stat().st_mtime)

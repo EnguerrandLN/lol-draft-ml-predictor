@@ -1,5 +1,5 @@
 """
-train_additive.py — Réglage, évaluation et export du modèle additif.
+train.py — Réglage, évaluation et export du modèle additif.
 
 Protocole (aucune fuite possible : une ligne = un match, découpage temporel) :
   1. Test     = les 15 % de matchs les plus récents. Jamais vus avant l'étape 3.
@@ -11,8 +11,8 @@ Protocole (aucune fuite possible : une ligne = un match, découpage temporel) :
   4. Export   = réentraînement sur TOUTES les données → data/additive_model.json.
 
 Usage :
-  python ml/train_additive.py
-  python ml/train_additive.py --min-tier EMERALD     # matchs étiquetés Émeraude+ uniquement
+  python ml/train.py
+  python ml/train.py --min-tier EMERALD     # matchs étiquetés Émeraude+ uniquement
 """
 import argparse
 import logging

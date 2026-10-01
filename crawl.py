@@ -1,5 +1,5 @@
 """
-main.py — Point d'entrée CLI du crawler de matchs Ranked Solo.
+crawl.py — Point d'entrée CLI du crawler de matchs Ranked Solo.
 
 Le crawler échantillonne des joueurs dans le ladder (par tier/division) et
 collecte leurs parties récentes. Il tourne en continu par passes successives
@@ -7,13 +7,13 @@ et reprend automatiquement là où il s'était arrêté (état en base).
 
 Usage :
   # Crawl continu avec les paramètres par défaut (config.py)
-  python main.py
+  python crawl.py
 
   # Uniquement le haut elo, sur les 14 derniers jours
-  python main.py --tiers EMERALD DIAMOND MASTER GRANDMASTER CHALLENGER --days-back 14
+  python crawl.py --tiers EMERALD DIAMOND MASTER GRANDMASTER CHALLENGER --days-back 14
 
   # S'arrêter à 200 000 matchs en base
-  python main.py --max-matches 200000
+  python crawl.py --max-matches 200000
 
 Clé API : lue dans .env (RIOT_API_KEY=RGAPI-...). Si elle expire en cours de
 route, le crawler se met en pause et reprend dès que .env contient une

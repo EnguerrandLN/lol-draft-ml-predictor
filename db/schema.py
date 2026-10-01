@@ -1,13 +1,8 @@
 """
-database/schema.py — Création du schéma SQLite optimisé pour le ML.
+db/schema.py — Création du schéma SQLite.
 
-Schéma en étoile :
   matches (centre) ← bans, participants (faits)
-  summoner_cache    (dimension joueur)
-  crawl_queue       (état du BFS)
-
-Jointure ML : une seule requête suffit pour reconstruire le vecteur
-  (bans, picks alliés, picks ennemis, position, version patch) → champion cible.
+  ladder_players    (file du crawler : joueurs échantillonnés par tier)
 """
 import logging
 import sqlite3
@@ -77,26 +72,6 @@ CREATE TABLE IF NOT EXISTS participants (
 );
 """
 
-_CREATE_SUMMONER_CACHE: str = """
-CREATE TABLE IF NOT EXISTS summoner_cache (
-    puuid           TEXT PRIMARY KEY,
-    summoner_id     TEXT,
-    summoner_name   TEXT,
-    region          TEXT,
-    last_crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-_CREATE_CRAWL_QUEUE: str = """
-CREATE TABLE IF NOT EXISTS crawl_queue (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    puuid        TEXT    NOT NULL UNIQUE,
-    status       TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | error
-    enqueued_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    processed_at TIMESTAMP
-);
-"""
-
 _CREATE_LADDER_PLAYERS: str = """
 CREATE TABLE IF NOT EXISTS ladder_players (
     puuid           TEXT    PRIMARY KEY,
@@ -114,7 +89,6 @@ _INDICES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_bans_match         ON bans(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_match  ON participants(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_puuid  ON participants(puuid);",
-    "CREATE INDEX IF NOT EXISTS idx_crawl_status        ON crawl_queue(status);",
     "CREATE INDEX IF NOT EXISTS idx_matches_version     ON matches(game_version);",
     "CREATE INDEX IF NOT EXISTS idx_ladder_next         ON ladder_players(status, priority);",
 ]
@@ -184,8 +158,6 @@ def init_db() -> sqlite3.Connection:
         _CREATE_MATCHES,
         _CREATE_BANS,
         _CREATE_PARTICIPANTS,
-        _CREATE_SUMMONER_CACHE,
-        _CREATE_CRAWL_QUEUE,
         _CREATE_LADDER_PLAYERS,
     ):
         conn.execute(stmt)

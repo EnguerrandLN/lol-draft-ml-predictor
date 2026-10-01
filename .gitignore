@@ -1,12 +1,19 @@
-# riot-draft-pipeline/.gitignore
 .env
 __pycache__/
 *.pyc
-*.db
-*.log
 .pytest_cache/
 
-# Ignore heavy legacy datasets/models
-data/mlm_draft_dataset.csv
-data/draft_model.pt
-data/win_predictor_model.pt
+# Base de données et fichiers SQLite associés (WAL)
+*.db
+*.db-shm
+*.db-wal
+
+# Logs (y compris les fichiers tournants crawler.log.1, .2...)
+*.log
+*.log.*
+
+# Cache des noms / icônes Data Dragon (régénéré automatiquement)
+data/champion_display.json
+
+# Configuration locale de l'aperçu Claude Code
+.claude/launch.json

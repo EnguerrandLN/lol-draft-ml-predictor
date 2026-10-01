@@ -1,5 +1,5 @@
 """
-database/repository.py — Couche d'accès aux données (DAL).
+db/repository.py — Couche d'accès aux données (DAL).
 
 Toutes les fonctions reçoivent une connexion sqlite3.Connection et opèrent
 en mode "INSERT OR IGNORE" / "ON CONFLICT DO UPDATE" pour être idempotentes
@@ -149,38 +149,6 @@ def upsert_participant(conn: sqlite3.Connection, match_id: str, p: dict) -> None
             p.get("wardsPlaced", 0),
             items,
         ),
-    )
-
-
-# ── Summoner cache ────────────────────────────────────────────────────────────
-
-def upsert_summoner(
-    conn: sqlite3.Connection,
-    puuid: str,
-    summoner_id: str,
-    summoner_name: str,
-    region: str,
-) -> None:
-    """
-    Met à jour le cache d'un invocateur (upsert).
-
-    Args:
-        conn: Connexion SQLite active.
-        puuid: PUUID Riot global.
-        summoner_id: ID spécifique à la plateforme.
-        summoner_name: Nom affiché de l'invocateur.
-        region: Région de la plateforme (ex: EUW1).
-    """
-    conn.execute(
-        """
-        INSERT INTO summoner_cache (puuid, summoner_id, summoner_name, region)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(puuid) DO UPDATE SET
-            summoner_id     = excluded.summoner_id,
-            summoner_name   = excluded.summoner_name,
-            last_crawled_at = CURRENT_TIMESTAMP
-        """,
-        (puuid, summoner_id, summoner_name, region),
     )
 
 
