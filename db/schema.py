@@ -97,12 +97,26 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
 );
 """
 
+_CREATE_LADDER_PLAYERS: str = """
+CREATE TABLE IF NOT EXISTS ladder_players (
+    puuid           TEXT    PRIMARY KEY,
+    tier            TEXT    NOT NULL,   -- GOLD ... CHALLENGER
+    division        TEXT,               -- I..IV (I pour les tiers apex)
+    league_points   INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'pending',  -- pending | done
+    priority        REAL    NOT NULL,   -- aléatoire : mélange les tiers dans la file
+    last_crawled_at INTEGER,            -- epoch s du dernier historique récupéré
+    snapshot_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 _INDICES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_bans_match         ON bans(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_match  ON participants(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_puuid  ON participants(puuid);",
     "CREATE INDEX IF NOT EXISTS idx_crawl_status        ON crawl_queue(status);",
     "CREATE INDEX IF NOT EXISTS idx_matches_version     ON matches(game_version);",
+    "CREATE INDEX IF NOT EXISTS idx_ladder_next         ON ladder_players(status, priority);",
 ]
 
 
@@ -116,6 +130,16 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE participants ADD COLUMN magic_damage_dealt_to_champions    INTEGER DEFAULT 0;",
     "ALTER TABLE participants ADD COLUMN true_damage_dealt_to_champions     INTEGER DEFAULT 0;",
     "ALTER TABLE participants ADD COLUMN total_damage_taken                 INTEGER DEFAULT 0;",
+    # Remake (gameEndedInEarlySurrender) : le résultat ne dépend pas de la draft
+    "ALTER TABLE matches ADD COLUMN ended_early     INTEGER;",
+    # Rang du joueur du ladder par lequel le match a été trouvé (proxy de l'ELO du match)
+    "ALTER TABLE matches ADD COLUMN source_tier     TEXT;",
+    "ALTER TABLE matches ADD COLUMN source_division TEXT;",
+]
+
+# Matchs collectés avant l'ajout de ended_early : la durée < 5 min sert de proxy.
+_BACKFILLS: list[str] = [
+    "UPDATE matches SET ended_early = (game_duration < 300) WHERE ended_early IS NULL;",
 ]
 
 
@@ -130,6 +154,8 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             conn.execute(stmt)
         except sqlite3.OperationalError:
             pass  # Colonne déjà présente — pas d'action requise
+    for stmt in _BACKFILLS:
+        conn.execute(stmt)
     conn.commit()
     logger.debug("Migrations appliquées.")
 
@@ -160,14 +186,15 @@ def init_db() -> sqlite3.Connection:
         _CREATE_PARTICIPANTS,
         _CREATE_SUMMONER_CACHE,
         _CREATE_CRAWL_QUEUE,
+        _CREATE_LADDER_PLAYERS,
     ):
         conn.execute(stmt)
 
-    for idx in _INDICES:
-        conn.execute(idx)
-
     # Migration des colonnes ajoutées après la création initiale
     _migrate_db(conn)
+
+    for idx in _INDICES:
+        conn.execute(idx)
 
     conn.commit()
     logger.info("Base de données initialisée : %s", DB_PATH)

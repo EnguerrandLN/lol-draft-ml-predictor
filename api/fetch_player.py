@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv()
 
-from api.client import RiotApiClient
+from api.client import ApiKeyError, RiotApiClient
 from config import RANKED_SOLO_QUEUE
 from api.crawler import process_match
 from db.repository import match_exists, get_match_count
@@ -192,6 +192,8 @@ def fetch_all_matches(
                 # (e.g. wrong queue filter or already existed mid-run)
                 already_in_db += 1
 
+        except ApiKeyError:
+            raise  # Clé expirée : inutile de continuer match par match
         except Exception as exc:
             logger.error("%s Error on %s: %s", prefix, match_id, exc, exc_info=True)
             errors += 1
