@@ -119,9 +119,11 @@ def upsert_participant(conn: sqlite3.Connection, match_id: str, p: dict) -> None
             physical_damage_dealt_to_champions,
             magic_damage_dealt_to_champions,
             true_damage_dealt_to_champions,
-            total_damage_taken,
+            total_damage_taken, damage_self_mitigated,
+            time_ccing_others, total_time_cc_dealt,
+            total_heal, total_heals_on_teammates, total_damage_shielded_on_teammates,
             vision_score, wards_placed, items
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             match_id,
@@ -145,6 +147,12 @@ def upsert_participant(conn: sqlite3.Connection, match_id: str, p: dict) -> None
             p.get("magicDamageDealtToChampions", 0),
             p.get("trueDamageDealtToChampions", 0),
             p.get("totalDamageTaken", 0),
+            p.get("damageSelfMitigated"),
+            p.get("timeCCingOthers"),
+            p.get("totalTimeCCDealt"),
+            p.get("totalHeal"),
+            p.get("totalHealsOnTeammates"),
+            p.get("totalDamageShieldedOnTeammates"),
             p.get("visionScore", 0),
             p.get("wardsPlaced", 0),
             items,

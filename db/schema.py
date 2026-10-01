@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS participants (
     true_damage_dealt_to_champions          INTEGER DEFAULT 0,
     -- Dégâts reçus
     total_damage_taken                      INTEGER DEFAULT 0,
+    damage_self_mitigated                   INTEGER,   -- dégâts absorbés (armure, RM, boucliers)
+    -- Contrôle et soutien (profils de champions : engage, soins, protection)
+    time_ccing_others                       INTEGER,   -- score Riot de temps de CC infligé
+    total_time_cc_dealt                     INTEGER,   -- durée cumulée des CC infligés (s)
+    total_heal                              INTEGER,
+    total_heals_on_teammates                INTEGER,
+    total_damage_shielded_on_teammates      INTEGER,
     vision_score                            INTEGER DEFAULT 0,
     wards_placed                            INTEGER DEFAULT 0,
     items                                   TEXT,   -- JSON: [item0..item6]
@@ -104,6 +111,13 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE participants ADD COLUMN magic_damage_dealt_to_champions    INTEGER DEFAULT 0;",
     "ALTER TABLE participants ADD COLUMN true_damage_dealt_to_champions     INTEGER DEFAULT 0;",
     "ALTER TABLE participants ADD COLUMN total_damage_taken                 INTEGER DEFAULT 0;",
+    # NULL pour les matchs collectés avant leur ajout (et non 0, qui serait une vraie valeur)
+    "ALTER TABLE participants ADD COLUMN damage_self_mitigated              INTEGER;",
+    "ALTER TABLE participants ADD COLUMN time_ccing_others                  INTEGER;",
+    "ALTER TABLE participants ADD COLUMN total_time_cc_dealt                INTEGER;",
+    "ALTER TABLE participants ADD COLUMN total_heal                         INTEGER;",
+    "ALTER TABLE participants ADD COLUMN total_heals_on_teammates           INTEGER;",
+    "ALTER TABLE participants ADD COLUMN total_damage_shielded_on_teammates INTEGER;",
     # Remake (gameEndedInEarlySurrender) : le résultat ne dépend pas de la draft
     "ALTER TABLE matches ADD COLUMN ended_early     INTEGER;",
     # Rang du joueur du ladder par lequel le match a été trouvé (proxy de l'ELO du match)
