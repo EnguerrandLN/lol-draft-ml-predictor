@@ -146,6 +146,67 @@ Gain de log-loss sur des parties futures, par rapport au modèle additif seul (7
   neurones, plus flexible et moins régularisé, n'en trouverait pas davantage.**
   À refaire quand le volume aura nettement augmenté.
 
+## 8. Portée et scaling des champions (`range_and_scaling.py`)
+
+Un effet linéaire de ces caractéristiques est déjà absorbé par la force
+champion × rôle : seuls des effets d'équipe non linéaires peuvent apporter
+quelque chose. Profils et modèle de base sur la 1re moitié chronologique,
+résidus testés sur la 2de (pas d'effet possible par construction).
+
+**Scaling — négatif.** Profil cohérent (late game : Bel'Veth, Kayle, Kassadin,
+Smolder ; early game : Diana, Irelia, LeBlanc), mais aucun effet d'équipe :
+résidus dans les intervalles de confiance, que ce soit selon le scaling de
+l'équipe ou selon l'écart avec l'adversaire.
+
+**Portée — effet plausible, faible.** Résidu selon le nombre de corps-à-corps
+(attackrange ≤ 250, Data Dragon) de son équipe :
+
+| Corps-à-corps | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| Résidu (pts) | −5,2 ± 5,0 | −1,3 ± 1,2 | −0,2 | +0,7 ± 0,6 | −0,3 | −4,0 ± 5,7 |
+| Équipes | 371 | 6 651 | 30 148 | 29 865 | 8 326 | 293 |
+
+Test hors échantillon d'un terme d'équipe b_lin·z + b_sq·z² (comme l'AD/AP) :
+
+| Fenêtre | Coefficients | Optimum | Gain de log-loss au test |
+|---|---|---|---|
+| Récente | +0,007 / −0,021 | 2,7 | +0,00003 ± 0,00028 |
+| Précédente | +0,007 / −0,020 | 2,7 | +0,00018 ± 0,00026 |
+
+Coefficients quasi identiques sur deux périodes (signe d'un effet réel, à
+l'inverse des synergies de la section 7), gain positif mais non significatif :
+l'effet ne concerne que les compositions rares (~−1,5 pt avec un seul
+corps-à-corps, ~−4 pts avec aucun). Non intégré à ce stade.
+
+## 9. Point à 100k matchs (02/10)
+
+**Réentraînement complet** (`ml/train.py`, 97,6k matchs exploitables) :
+- Sensibilités par champion **non adoptées** : validation glissante −0,00008 ±
+  0,00017. Avec plus de données, les effets estimés sont plus diffus et plus
+  petits (π 23 % → 66 %, τ 0,034 → 0,017) ; Malphite : pente +0,095 → +0,072,
+  part retenue 67 % → 37 %. Seul l'équilibre AD/AP d'équipe reste actif.
+- Calibration Master+ confirmée sur 11k matchs : 0,58 ± 0,20 (facteur 0,59).
+  Émeraude-Diamant 0,86, Gold-Platine 0,95.
+- Écarts par ELO, synergies de duo et pondération de récence toujours rejetés ;
+  matchups de lane conservés (échelle 0,5).
+- Test (15 % les plus récents) : gain +0,0023 ± 0,0016, précision 53,3 %.
+
+**Contrôle, soutien, vraie frontline** (`team_profiles.py`, profils sur les 22k
+matchs collectés avec les nouveaux champs) : profils cohérents (contrôle :
+Nocturne, Maokai, Nautilus ; soutien : Zac, Vladimir, Soraka ; frontline :
+Sion, K'Santé, Rammus, Ornn) mais **aucun effet d'équipe** : gain hors
+échantillon entre −0,00012 et +0,00008 (± ~0,0001) pour les trois.
+
+**Corps-à-corps** (`range_and_scaling.py --oos`) : coefficients toujours stables
+(quad −0,024 / −0,023, optimum 2,7) ; gain au test −0,00016 et +0,00022.
+Toujours non prouvé, toujours non intégré.
+
+**Factorization machine** (`factorization_machine.py`) : premier signal faible
+sur la fenêtre récente (synergies + counters +0,00021 ± 0,00014) mais pas sur
+la précédente (−0,00008 ± 0,00035), et paires apprises instables, dominées
+par les champions les plus joués. Pas encore de quoi justifier un réseau de
+neurones ; à refaire vers 150-200k matchs.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
