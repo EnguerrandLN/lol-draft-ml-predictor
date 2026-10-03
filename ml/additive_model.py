@@ -201,6 +201,7 @@ class AdditiveDraftModel:
     hyperparams: Hyperparams
     games: dict[str, dict[str, int]] = field(default_factory=dict)          # rôle → champion → matchs
     pick_rate: dict[str, dict[str, float]] = field(default_factory=dict)    # rôle → champion → part
+    pick_rate_by_tier: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)  # tranche → rôle → …
     champion_names: dict[str, str] = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
     damage: Optional[DamageProfile] = None
@@ -254,15 +255,28 @@ class AdditiveDraftModel:
         games : nombre de VRAIS matchs (pas de lignes augmentées) par champion et rôle.
         pick_rate : part des picks du rôle, pondérée par récence (sert d'a priori
         sur ce que l'adversaire / l'allié va jouer dans un slot encore vide).
+        pick_rate_by_tier : la même chose par tranche d'ELO (les champions joués
+        diffèrent d'un niveau à l'autre ; les matchs de tier inconnu sont exclus).
         """
         w = recency_weights(df.game_creation, self.hyperparams.half_life_days)
+
+        def shares(sub: pd.DataFrame, weights: np.ndarray, role: str) -> dict[str, float]:
+            champs = pd.concat([sub[f"blue_{role}"], sub[f"red_{role}"]]).astype(int)
+            share = pd.Series(np.concatenate([weights, weights]), index=champs.to_numpy()).groupby(level=0).sum()
+            return {str(c): float(v) for c, v in (share / share.sum()).items()}
+
         self.games, self.pick_rate = {}, {}
         for role in ROLES:
             champs = pd.concat([df[f"blue_{role}"], df[f"red_{role}"]]).astype(int)
-            weights = np.concatenate([w, w])
             self.games[role] = {str(c): int(n) for c, n in champs.value_counts().items()}
-            share = pd.Series(weights, index=champs.to_numpy()).groupby(level=0).sum()
-            self.pick_rate[role] = {str(c): float(v) for c, v in (share / share.sum()).items()}
+            self.pick_rate[role] = shares(df, w, role)
+
+        self.pick_rate_by_tier = {}
+        if "source_tier" in df.columns:
+            buckets = df.source_tier.map(TIER_TO_BUCKET)
+            for bucket in buckets.dropna().unique():
+                mask = (buckets == bucket).to_numpy()
+                self.pick_rate_by_tier[bucket] = {role: shares(df[mask], w[mask], role) for role in ROLES}
         self.champion_names = {str(cid): name for cid, name in names.items()}
 
     # ── Sérialisation ─────────────────────────────────────────────────────────
@@ -275,6 +289,7 @@ class AdditiveDraftModel:
             "effects": self.effects,
             "games": self.games,
             "pick_rate": self.pick_rate,
+            "pick_rate_by_tier": self.pick_rate_by_tier,
             "champion_names": self.champion_names,
             "damage": None if self.damage is None else {
                 "ad_share": {str(c): v for c, v in self.damage.ad_share.items()},
@@ -296,6 +311,7 @@ class AdditiveDraftModel:
             hyperparams=Hyperparams(**d["hyperparams"]),
             games=d["games"],
             pick_rate=d["pick_rate"],
+            pick_rate_by_tier=d.get("pick_rate_by_tier", {}),
             champion_names=d["champion_names"],
             meta=d["meta"],
             damage=None if dmg is None else DamageProfile(

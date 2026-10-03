@@ -137,19 +137,25 @@ class DraftRecommender:
         self.pick_rate: dict[str, Dist] = {
             r: {int(c): p for c, p in model.pick_rate[r].items()} for r in ROLES
         }
+        self.pick_rate_by_tier: dict[str, dict[str, Dist]] = {
+            b: {r: {int(c): p for c, p in rates[r].items()} for r in ROLES}
+            for b, rates in model.pick_rate_by_tier.items()
+        }
 
     # ── Distributions des slots ──────────────────────────────────────────────
 
     def _slot_dists(self, state: DraftState) -> dict[tuple[str, str], Dist]:
-        """(équipe, rôle) → distribution : masse 1 si connu, sinon pick rates disponibles."""
+        """(équipe, rôle) → distribution : masse 1 si connu, sinon pick rates disponibles
+        (ceux de la tranche d'ELO du joueur si elle est connue)."""
         unavailable = state.unavailable()
+        pick_rate = self.pick_rate_by_tier.get(state.tier, self.pick_rate) if state.tier else self.pick_rate
         dists = {}
         for team, picks in (("ally", state.ally), ("enemy", state.enemy)):
             for role in ROLES:
                 if role in picks:
                     dists[(team, role)] = {picks[role]: 1.0}
                 else:
-                    avail = {c: p for c, p in self.pick_rate[role].items() if c not in unavailable}
+                    avail = {c: p for c, p in pick_rate[role].items() if c not in unavailable}
                     total = sum(avail.values())
                     dists[(team, role)] = {c: p / total for c, p in avail.items()} if total else {}
         return dists
@@ -425,6 +431,8 @@ def main() -> None:
     p.add_argument("--tier", choices=["LOW", "MID", "HIGH"], default=None,
                    help="Ta tranche : LOW = Gold-Platine et moins, MID = Émeraude-Diamant, HIGH = Master+.")
     p.add_argument("--min-games", type=int, default=50)
+    p.add_argument("--jamais-joue", action="store_true", dest="unfamiliar",
+                   help="Appliquer le coût d'inexpérience mesuré : ce que vaut chaque pick pour qui ne le joue pas.")
     p.add_argument("--risk", type=float, default=0.0,
                    help="0 = proba attendue, 1 = proba si contré.")
     p.add_argument("--top", type=int, default=10)
@@ -442,7 +450,11 @@ def main() -> None:
     )
     pool = {resolve_champion(c, rec.names) for c in args.pool} if args.pool else None
 
-    results = rec.recommend(state, args.role, pool=pool, min_games=args.min_games, risk=args.risk)
+    personal = None
+    if args.unfamiliar:
+        from ml.personal import personal_offsets  # Import local : la CLI de base reste légère
+        personal = personal_offsets(model, args.role)
+    results = rec.recommend(state, args.role, pool=pool, min_games=args.min_games, risk=args.risk, personal=personal)
     print(f"\nRôle {args.role} — {len(results)} candidats (≥ {args.min_games} matchs au rôle)\n")
     print(f"{'#':>3} {'Champion':<14} {'Victoire':>8} {'vs moyen':>10} {'Si contré':>10}  {'par':<12} {'Matchs':>6}")
     for i, r in enumerate(results[:args.top], 1):
