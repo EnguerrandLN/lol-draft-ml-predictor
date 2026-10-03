@@ -16,7 +16,8 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
 |---|---|---|
 | Constante (toujours ~50 %) | 0,6931 | 50 % |
 | Force champion × rôle seule | 0,6901 | 53,3 % ± 0,6 |
-| **Modèle complet** | **0,6886** | **54,1 % ± 0,6** |
+| Modèle sans matchups appris sur l'or | 0,6886 | 54,1 % ± 0,6 |
+| **Modèle complet** | **0,6876** | **54,4 % ± 0,6** |
 
 - La draft seule explique peu du résultat en Ranked Solo (le reste, ce sont les
   joueurs) : ~54 % est proche du plafond connu pour ce type de prédiction. Un
@@ -36,9 +37,15 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
   Appliqué automatiquement avec ton profil, affiché sinon (« Si jamais joué »).
 - **Selon le niveau** : en Master+, la draft pèse moins (facteur 0,76) ; l'app
   applique les forces et la calibration de ton niveau, détecté depuis ton Riot ID.
-- **Pas d'interaction exploitable au-delà** : synergies et counters « par
-  ressemblance » (factorization machine) testés jusqu'à 150k matchs sans gain,
-  donc pas de réseau de neurones à ce stade.
+- **Counters appris sur les statistiques de lane** : le résultat d'une partie
+  (1 bit) ne suffit pas à estimer ~15 000 matchups par rôle. Ils sont appris
+  sur un signal continu, l'écart de part d'or entre les deux laners (tâche
+  auxiliaire), puis transférés au modèle de victoire (cross-fitting). Gain
+  significatif sur des parties futures ; le modèle retrouve des counters connus
+  (Sett et Warwick contre Irelia, Malphite et Teemo contre Vayne top…).
+- **Pas d'interaction « par ressemblance »** : synergies et counters déduits
+  d'embeddings de champions (factorization machine) testés jusqu'à 150k matchs
+  sans gain, donc pas de réseau de neurones entraîné sur la victoire.
 
 Détail des expériences et de l'audit : [`experiments/RESULTS.md`](experiments/RESULTS.md).
 Description de la base de données : [`DATABASE.md`](DATABASE.md).
@@ -63,6 +70,7 @@ ml/
   evaluate.py        Évaluation scellée d'un modèle sur une période jamais vue
   recommend.py       Recommandation sur une draft partielle (+ CLI)
   personal.py        Personnalisation par l'historique du joueur
+  lane_stats.py      Matchups appris sur la part d'or des laners (tâche auxiliaire)
   display_names.py   Noms et icônes des champions (Data Dragon)
 data/
   additive_model.json  Modèle entraîné (versionné : l'app fonctionne sans la base)
@@ -151,7 +159,7 @@ python -m pytest
 ```
 logit P(victoire) = avantage de côté
                   + force champion × rôle          (par équipe)
-                  + matchups de lane                (atténués)
+                  + matchups de lane                (atténués + appris sur la part d'or)
                   + synergies bot / jungle-mid / jungle-top
                   + équilibre des dégâts de l'équipe
                   + sensibilité de certains champions au profil adverse

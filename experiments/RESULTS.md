@@ -302,6 +302,43 @@ matchs collectés avec les nouveaux champs.
 429 du crawler négligeables (~0,1 % des requêtes), recommandeur exact par
 rapport au modèle (tests d'énumération).
 
+## 12. Matchups appris sur les statistiques de lane (`lane_stats_matchups.py`, 152k matchs)
+
+Le résultat d'une partie ne suffit pas à estimer les matchups (~15 000 paires
+par rôle). Tâche auxiliaire : par lane, régression ridge d'un signal continu
+mesuré à chaque partie sur les forces et les matchups, puis transfert au modèle
+de victoire (score de matchups × β). Deux cibles :
+- **écart d'or brut** entre les deux laners : très lié au résultat (corr. ~0,55) ;
+- **écart de part d'or dans l'équipe** : quasi indépendant du résultat (corr. ~0),
+  domination de lane « pure ».
+
+Piège rencontré : sans cross-fitting, les prédictions en échantillon de la cible
+« écart d'or » contiennent l'issue des parties d'entraînement → coefficient
+gonflé (0,24) et perte au test (−0,002). Avec cross-fitting (scores de
+l'entraînement prédits par des modèles entraînés sans ces matchs) :
+
+| Matchups appris sur… | Fenêtre récente | Fenêtre précédente |
+|---|---|---|
+| Écart d'or brut | +0,0008 ± 0,0005 | +0,0007 ± 0,0005 |
+| **Part d'or dans l'équipe** | **+0,0010 ± 0,0005** | **+0,0009 ± 0,0005** |
+| Les deux (corrélées à 0,88) | +0,0009 | +0,0008 |
+| Forces apprises sur l'or | ≈ 0 | ≈ 0 |
+
+Premier gain d'interaction significatif et reproduit. Intégré
+(`ml/lane_stats.py`) : la décision passe par la validation glissante (+0,00065 ±
+0,00034, adopté), puis β·score est réécrit en effets de lane du modèle additif
+(le recommandeur les traite sans modification). Le réglage écarte les matchups
+de support (part d'or non pertinente pour ce rôle).
+
+Modèle final (test, 15 % les plus récents) : gain **+0,0056 ± 0,0014** (contre
++0,0045 sans), précision 54,4 %. Counters retrouvés : contre Irelia, Warwick et
+Sett (+6,5 pts vs pick moyen) ; contre Vayne top, Malphite, Teemo, Nasus ;
+contre Yasuo mid, Malzahar, Lissandra, Vladimir.
+
+Prolongements : l'or à 10-15 minutes (endpoint *timeline*, hors contamination
+de fin de partie), le farm et les dégâts comme cibles auxiliaires
+supplémentaires, et la même idée pour les synergies (bot lane : part d'or du duo).
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
