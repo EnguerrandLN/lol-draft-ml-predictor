@@ -207,6 +207,101 @@ la précédente (−0,00008 ± 0,00035), et paires apprises instables, dominées
 par les champions les plus joués. Pas encore de quoi justifier un réseau de
 neurones ; à refaire vers 150-200k matchs.
 
+## 10. Point à 155k matchs (03/10)
+
+**Réentraînement complet** (151,7k matchs exploitables, 102k étiquetés par
+tier) — la validation adopte d'elle-même trois couches rejetées jusqu'ici :
+
+| Couche | 100k | 155k |
+|---|---|---|
+| Écarts de force par tranche d'ELO | rejetés | **adoptés** (échelle 0,3) |
+| Synergies de duo (bot, jungle-mid, jungle-top) | rejetées | **adoptées** (échelle 0,3) |
+| Sensibilités par champion au profil adverse | rejetées | **adoptées** (validation +0,00001) |
+| Calibration Master+ | 0,59 | 0,76 |
+
+Sensibilités : Malphite part retenue 77 % (+0,064), Galio 52 %, Kassadin 43 %.
+Calibration : Gold-Platine 1,03, Émeraude-Diamant 0,94, Master+ 0,76 (les écarts
+par ELO absorbent une partie de l'écart).
+
+Test (22,7k matchs les plus récents) : gain **+0,0045 ± 0,0013**, précision
+54,2 %, contre +0,0030 pour la force champion × rôle seule : les couches
+supplémentaires apportent +0,0015, le plus gros apport mesuré à ce jour.
+
+Comportement : Malphite 1er contre une composition full AD ; Galio puis
+Kassadin en tête contre une composition full AP ; classements de jungle
+différents selon le niveau (Briar 1re en Gold-Platine, RekSai et Sejuani devant
+en Master+). Le biais des spécialistes reste visible en blind pick (Karthus,
+Veigar, Yone en ADC ; Darius en jungle).
+
+**Factorization machine** : le signal faible de 100k ne se confirme pas
+(synergies + counters +0,00009 ± 0,00018 sur les deux fenêtres) ; paires
+apprises toujours instables. Les interactions qui passent sont les duos
+fréquents, estimés paire par paire : il n'y a toujours pas de structure de
+« ressemblance » exploitable, donc pas de réseau de neurones.
+
+**Corps-à-corps** : coefficients stables (optimum 2,7) mais l'effet rétrécit
+(quad −0,024 → −0,016) et le gain au test est nul (−0,00004 / 0,00000 ±
+0,00015). Toujours non intégré.
+
+**Contrôle, soutien, frontline** (profils sur 75k matchs) : soutien et
+frontline nuls ; **contrôle** légèrement positif sur les deux fenêtres
+(+0,00007 et +0,00004 ± 0,00007, coefficients identiques : une équipe qui
+contrôle plus gagne un peu plus). Pas significatif ; à revoir avec plus de
+matchs collectés avec les nouveaux champs.
+
+## 11. Audit du projet (03/10, 152k matchs)
+
+**Hypothèses vérifiées et réfutées**
+- *Les picks de niche (Karthus ADC…) viennent d'un ou deux one-tricks
+  sur-représentés par le crawl* : **faux**. Karthus ADC = 1 197 parties de 646
+  joueurs, le plus présent en fait 4 % ; seuls 9 couples champion × rôle sur
+  564 dépendent à plus de 20 % d'un seul joueur.
+- *Karthus et Veigar ADC sont surévalués pour un non-spécialiste* : **faux**.
+  Ce ne sont pas des picks de niche (31 % et 29 % des parties de ces champions
+  se jouent en bot) et leur coût d'inexpérience est celui d'un pick courant.
+
+**Problèmes trouvés et corrigés**
+1. **Coût d'inexpérience** (le plus important). À joueur égal et en ne comptant
+   que les parties antérieures, l'écart « jamais joué » vs « 3+ parties » selon
+   la part du rôle dans les parties du champion :
+
+   | Part du rôle | < 5 % | 5-10 % | 10-20 % | 20-35 % | 35-60 % | > 60 % |
+   |---|---|---|---|---|---|---|
+   | Écart (pts) | −4,1 | −3,1 | −1,5 | −2,0 | −2,5 | −2,0 |
+
+   Le surcoût est concentré sous 10 % (vrais picks de niche : Kog'Maw top,
+   Galio top, Fiddlesticks top…). Mesuré à chaque entraînement
+   (`estimate_familiarity`, pick courant / de niche × jamais / 1-2 / 3+) et
+   utilisé comme moyenne a priori du décalage personnel ; sans profil, l'app
+   affiche « Si jamais joué ». Effet : les picks de niche quittent le haut du
+   classement pour qui ne les joue pas (Top : Kog'Maw 52,6 % → 49,4 %).
+2. **Règle d'adoption des sensibilités par champion** : basculait au hasard
+   (adoptées à 75k, rejetées à 100k, adoptées à 155k) sur des gains de ±0,00001
+   pour un IC de ±0,00015. Le lissage bayésien se règle déjà sur la force des
+   preuves : la validation ne les rejette plus que si elles nuisent
+   significativement (gain + IC < 0).
+3. **Fuite mineure** : le profil de dégâts des champions était mesuré en
+   incluant la période de test. Il est désormais calculé sans elle pour
+   l'évaluation (effet négligeable : Malphite 0,262 → 0,261).
+4. **Représentativité des niveaux** : le crawl prend autant de joueurs par
+   division, d'où 24 % de Master+ et 27 % de Diamant parmi les matchs étiquetés
+   (contre ~1 % et ~3 % des joueurs). Le modèle « niveau non précisé » est donc
+   tiré vers le haut ELO. Corrigé côté usage : rang détecté depuis le Riot ID
+   (niveau réglé automatiquement), pick rates propres à chaque niveau pour les
+   slots encore vides, avertissement dans l'app.
+5. **Évaluation réutilisée** : toutes les décisions de conception ont été
+   prises en regardant les mêmes fenêtres de test : les chiffres de test sont
+   légèrement optimistes. Ajout de `train.py --until` et `ml/evaluate.py` pour
+   une évaluation scellée sur une période jamais vue (ex. le patch 16.20).
+6. **Tests** : le pipeline d'entraînement n'en avait aucun. Ajout d'un test de
+   bout en bout sur données simulées, d'un aller-retour de sérialisation du
+   modèle complet, des pick rates par niveau et de la mesure de familiarité
+   (49 tests).
+
+**Vérifié et sain** : calibration (prédit 41 % → observé 42 % ; 59 % → 58 %),
+429 du crawler négligeables (~0,1 % des requêtes), recommandeur exact par
+rapport au modèle (tests d'énumération).
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
