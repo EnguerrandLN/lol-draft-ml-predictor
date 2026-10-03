@@ -19,6 +19,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -34,6 +35,7 @@ from ml.draft_data import (
     ROLES, TIER_BUCKET_LABELS, TIER_TO_BUCKET, load_champion_ad_share, load_champion_names, load_matches,
     load_player_slots,
 )
+from ml.lane_stats import lane_stat_layer, lane_targets, load_lane_gold, tune_lane_settings
 from ml.personal import estimate_familiarity, estimate_tau, residuals, role_shares
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
@@ -199,10 +201,48 @@ def decide_comp(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
     return {"adopted": adopted, "gain": gain, "ci95": ci}
 
 
+def with_extra_effects(model: AdditiveDraftModel, extra: dict[str, float]) -> AdditiveDraftModel:
+    """Copie du modèle dont les effets sont augmentés de `extra` (sommés si la clé existe déjà)."""
+    effects = dict(model.effects)
+    for key, value in extra.items():
+        effects[key] = effects.get(key, 0.0) + value
+    return AdditiveDraftModel(model.intercept, effects, model.hyperparams, damage=model.damage)
+
+
+def base_with_layers(train: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float], use_comp: bool):
+    model = AdditiveDraftModel.fit(train, hp, ad_share)
+    return with_comp(model, train) if (use_comp and model.damage is not None) else model
+
+
+def decide_lane_stats(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float], use_comp: bool,
+                      targets: pd.DataFrame, n_folds: int = 3, block: float = 0.1) -> dict:
+    """
+    Les matchups appris sur la part d'or (ml/lane_stats.py) améliorent-ils les
+    prédictions sur des parties futures ? Même validation glissante que le
+    réglage, même règle de parcimonie : adoptés si le gain ≥ MIN_IMPROVEMENT.
+    Les réglages ridge sont choisis une fois sur `df` (critère : erreur sur la
+    part d'or, cible quasi indépendante du résultat), puis réutilisés par fold.
+    """
+    settings = tune_lane_settings(df, targets)
+    diffs = []
+    for train, val in rolling_folds(df, n_folds, block):
+        model = base_with_layers(train, hp, ad_share, use_comp)
+        extra, _, _ = lane_stat_layer(train, targets, model.predict_logit(train), settings, n_folds=3)
+        y = val.blue_win.to_numpy()
+        diffs.append(log_losses(y, model.predict_proba(val))
+                     - log_losses(y, with_extra_effects(model, extra).predict_proba(val)))
+    d = np.concatenate(diffs)
+    gain, ci = float(d.mean()), float(1.96 * d.std(ddof=1) / np.sqrt(len(d)))
+    adopted = gain >= MIN_IMPROVEMENT
+    log.info("Matchups appris sur la part d'or en validation glissante : gain %+.5f ± %.5f → %s",
+             gain, ci, "adoptés" if adopted else "non adoptés")
+    return {"adopted": adopted, "gain": gain, "ci95": ci}
+
+
 # ── Rapport sur le test ───────────────────────────────────────────────────────
 
 def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
-           use_comp: bool) -> dict:
+           use_comp: bool, lane_targets_df: Optional[pd.DataFrame] = None, use_lane: bool = False) -> dict:
     y = test.blue_win.to_numpy()
     n = len(y)
     p_const = np.full(n, train.blue_win.mean())
@@ -224,6 +264,14 @@ def report(train: pd.DataFrame, test: pd.DataFrame, hp: Hyperparams, ad_share: d
     if base.damage is not None:
         candidates["Avec sensibilités lissées"] = lambda: with_comp(base, train)
     retained = "Avec sensibilités lissées" if use_comp else "Sans sensibilités par champion"
+    if lane_targets_df is not None:
+        def with_lane():
+            model = with_comp(base, train) if (use_comp and base.damage is not None) else base
+            extra, _, _ = lane_stat_layer(train, lane_targets_df, model.predict_logit(train))
+            return with_extra_effects(model, extra)
+        candidates["+ matchups appris sur l'or"] = with_lane
+        if use_lane:
+            retained = "+ matchups appris sur l'or"
 
     for label, build in candidates.items():
         p = p_const if build is None else build().predict_proba(test)
@@ -323,7 +371,10 @@ def main() -> None:
     eval_ad_share = load_champion_ad_share(before_ms=int(test.game_creation.min()))
     hp = tune(train_full, eval_ad_share)
     comp_decision = decide_comp(train_full, hp, eval_ad_share)
-    results = report(train_full, test, hp, eval_ad_share, use_comp=comp_decision["adopted"])
+    targets = lane_targets(load_lane_gold(df))
+    lane_decision = decide_lane_stats(train_full, hp, eval_ad_share, comp_decision["adopted"], targets)
+    results = report(train_full, test, hp, eval_ad_share, use_comp=comp_decision["adopted"],
+                     lane_targets_df=targets, use_lane=lane_decision["adopted"])
     ad_share = load_champion_ad_share()
 
     log.info("Entraînement final sur les %d matchs...", len(df))
@@ -333,6 +384,13 @@ def main() -> None:
         comp_effects, comp_stats = fit_comp_effects(model, df)
         if comp_decision["adopted"]:
             model.effects.update(comp_effects)
+    lane_info = {"adopted": False}
+    if lane_decision["adopted"]:
+        extra, beta, settings = lane_stat_layer(df, targets, model.predict_logit(df))
+        model = AdditiveDraftModel(model.intercept, with_extra_effects(model, extra).effects,
+                                   model.hyperparams, damage=model.damage)
+        lane_info = {"adopted": True, "beta": beta, "settings": settings}
+        log.info("Matchups appris sur la part d'or : β = %.3f, réglages %s", beta, settings)
     model.attach_stats(df, load_champion_names())
     # Écart réel entre joueurs sur un même champion : a priori de la personnalisation
     res = residuals(model, df, load_player_slots())
@@ -359,6 +417,8 @@ def main() -> None:
         "test_results": results,
         "personal_tau": personal_tau,
         "familiarity": familiarity,
+        "lane_stats": {**lane_info, "validation_gain": lane_decision["gain"],
+                       "validation_ci95": lane_decision["ci95"]},
         "tier_calibration": {b: c["scale"] for b, c in tier_calibration.items()},
         "tier_calibration_detail": tier_calibration,
         # Sensibilités au profil adverse : décision, a priori estimé et champions les mieux établis
