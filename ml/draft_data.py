@@ -99,20 +99,27 @@ def load_player_slots(db_path: Path = DB_PATH, puuid: Optional[str] = None) -> p
     return slots
 
 
-def load_champion_ad_share(db_path: Path = DB_PATH) -> dict[int, float]:
+def load_champion_ad_share(db_path: Path = DB_PATH, before_ms: Optional[int] = None) -> dict[int, float]:
     """
     Part des dégâts physiques dans les dégâts infligés aux champions, par
     champion (tous rôles), mesurée sur les vraies parties : 0.01 pour Karthus,
     0.98 pour Draven. Sert à décrire le profil de dégâts d'une équipe.
+
+    Args:
+        before_ms: Si fourni, seulement les parties commencées avant cette date
+            (epoch ms) : l'évaluation ne doit rien utiliser de la période de test.
     """
     conn = connect_read_only(db_path)
     rows = conn.execute(
         """
-        SELECT champion_id, SUM(physical_damage_dealt_to_champions) * 1.0 / SUM(total_damage_dealt_to_champions)
-        FROM participants
-        WHERE champion_id > 0 AND total_damage_dealt_to_champions > 0
-        GROUP BY champion_id
-        """
+        SELECT p.champion_id,
+               SUM(p.physical_damage_dealt_to_champions) * 1.0 / SUM(p.total_damage_dealt_to_champions)
+        FROM participants p JOIN matches m USING (match_id)
+        WHERE p.champion_id > 0 AND p.total_damage_dealt_to_champions > 0
+          AND (:before IS NULL OR m.game_creation < :before)
+        GROUP BY p.champion_id
+        """,
+        {"before": before_ms},
     ).fetchall()
     conn.close()
     return {int(cid): float(share) for cid, share in rows}

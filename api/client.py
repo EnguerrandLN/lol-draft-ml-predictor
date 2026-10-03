@@ -438,3 +438,14 @@ class RiotApiClient:
         url = f"{self.platform_url}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}"
         result: Optional[list] = self._request(url)
         return result if isinstance(result, list) else []
+
+    def get_league_entries_by_puuid(self, puuid: str) -> list[dict]:
+        """
+        Classements d'un joueur (une entrée par file classée) via League-V4.
+
+        Returns:
+            Liste de LeagueEntryDTO (queueType, tier, rank, leaguePoints...), vide si non classé.
+        """
+        url = f"{self.platform_url}/lol/league/v4/entries/by-puuid/{puuid}"
+        result: Optional[list] = self._request(url)
+        return result if isinstance(result, list) else []

@@ -20,8 +20,8 @@ from config import DATA_DIR
 from db.schema import init_db
 from ml.additive_model import AdditiveDraftModel
 from ml.display_names import load_champion_display
-from ml.draft_data import ROLES, TIER_BUCKET_LABELS, connect_read_only
-from ml.personal import ChampionProfile, fetch_history, player_profile
+from ml.draft_data import ROLES, TIER_BUCKET_LABELS, TIER_TO_BUCKET, connect_read_only
+from ml.personal import ChampionProfile, fetch_history, personal_offsets, player_profile
 from ml.recommend import DraftRecommender, DraftState
 
 MODEL_PATH: Path = DATA_DIR / "additive_model.json"
@@ -73,11 +73,16 @@ with st.sidebar:
     )
 
     st.header("Paramètres")
+    # Niveau détecté à l'import du profil : appliqué avant de créer le widget
+    if "pending_tier" in st.session_state:
+        st.session_state["tier"] = st.session_state.pop("pending_tier")
     tier = st.selectbox(
-        "Ton niveau", [None] + list(TIER_BUCKET_LABELS),
+        "Ton niveau", [None] + list(TIER_BUCKET_LABELS), key="tier",
         format_func=lambda b: "Non précisé" if b is None else TIER_BUCKET_LABELS[b],
-        help="Les forces de champions et le poids de la draft varient selon le niveau : le modèle "
-             "applique les écarts propres à ta tranche quand les données les établissent.",
+        help="Les forces de champions, les picks courants et le poids de la draft varient selon le "
+             "niveau. Rempli automatiquement quand tu charges ton profil.  \n"
+             "« Non précisé » utilise toutes les parties de la base, où le haut ELO est "
+             "sur-représenté (~25 % de Master+ contre ~1 % des joueurs) : précise ton niveau.",
     )
     if tier and rec.calibration_scale(tier) != 1.0:
         st.caption(f"À ce niveau, les effets de draft mesurés pèsent ×{rec.calibration_scale(tier):.2f} "
@@ -135,6 +140,8 @@ def import_history(riot_id: str, limit: int) -> None:
         )
         conn.close()
         masteries = client.get_champion_masteries(account["puuid"])
+        solo = next((e for e in client.get_league_entries_by_puuid(account["puuid"])
+                     if e.get("queueType") == "RANKED_SOLO_5x5"), None)
     except ApiKeyError:
         st.error("Clé API refusée (expirée ?). Mets à jour .env puis réessaie.")
         return
@@ -147,8 +154,12 @@ def import_history(riot_id: str, limit: int) -> None:
         "riot_id": riot_id,
         "puuid": account["puuid"],
         "masteries": {m["championId"]: m["championPoints"] for m in masteries},
+        "rank": f"{solo['tier'].capitalize()} {solo.get('rank', '')}".strip() if solo else None,
+        "imported": new,
     }
-    st.toast(f"{new} nouvelle(s) partie(s) importée(s).")
+    if solo and solo.get("tier") in TIER_TO_BUCKET:
+        st.session_state["pending_tier"] = TIER_TO_BUCKET[solo["tier"]]
+    st.rerun()
 
 
 with st.sidebar:
@@ -172,7 +183,8 @@ if player:
             wins = sum(p.wins for p in profiles.values())
             expected = sum(p.expected_wins for p in profiles.values())
             st.caption(
-                f"**{player['riot_id']}** · {games} parties analysées  \n"
+                f"**{player['riot_id']}**{' · ' + player['rank'] if player.get('rank') else ''}"
+                f" · {games} parties analysées ({player.get('imported', 0)} nouvelles)  \n"
                 f"Victoires : **{wins / games:.1%}**, contre {expected / games:.1%} attendus d'après tes drafts."
             )
         else:
@@ -254,8 +266,17 @@ results = rec.recommend(
     # l'atténuation du modèle ramène déjà leur effet global vers 0.
     min_games=0 if own_pool else min_games,
     risk=risk,
-    personal={c: p.effect for c, p in profiles.items()} or None,
+    personal=personal_offsets(rec.model, role, profiles) if profiles else None,
 )
+# Sans profil : ce que vaut chaque pick pour quelqu'un qui ne l'a jamais joué
+# (coût d'inexpérience mesuré, plus fort pour les picks de niche)
+never_played: dict[int, float] = {}
+if not profiles:
+    never_played = {
+        r.champion_id: r.win_prob
+        for r in rec.recommend(state, role, pool=set(pool) or None, min_games=min_games, risk=risk,
+                               personal=personal_offsets(rec.model, role))
+    }
 
 n_known = len(ally_picks) + len(enemy_picks)
 col_metric, col_info = st.columns([1, 3])
@@ -285,6 +306,8 @@ def result_row(r) -> dict:
         "Pire matchup": name(r.worst_response_id) if r.worst_response_id is not None else "—",
         "Matchs au rôle": r.games,
     }
+    if never_played:
+        row["Si jamais joué"] = never_played.get(r.champion_id, float("nan")) * 100
     if profiles:
         prof = profiles.get(r.champion_id)
         row["Tes parties"] = prof.games_by_role.get(role, 0) if prof else 0
@@ -305,6 +328,11 @@ st.dataframe(
         "Victoire": st.column_config.ProgressColumn("Victoire", format="%.1f %%", min_value=40, max_value=60),
         "vs pick moyen": st.column_config.NumberColumn("vs pick moyen", format="%+.1f pts"),
         "Si contré": st.column_config.NumberColumn("Si contré", format="%.1f %%"),
+        "Si jamais joué": st.column_config.NumberColumn(
+            "Si jamais joué", format="%.1f %%",
+            help="Probabilité de victoire si tu n'as jamais joué ce champion : les forces sont mesurées "
+                 "sur ceux qui le choisissent, souvent des habitués. Le coût d'inexpérience est mesuré "
+                 "sur la base, et il est plus fort pour les picks de niche (ex. un mage en ADC)."),
         "Matchs au rôle": st.column_config.NumberColumn("Matchs au rôle", format="%d"),
         "Tes parties": st.column_config.NumberColumn("Tes parties", format="%d",
                                                      help="Tes parties sur ce champion à ce rôle."),
@@ -326,12 +354,13 @@ with st.expander("Comment lire ces chiffres"):
         "- **Si contré** : la même probabilité si ton vis-à-vis choisit, parmi ses picks courants, "
         "ton pire matchup (**Pire matchup**).\n"
         "- **Matchs au rôle** : nombre de parties réelles sur lesquelles repose l'estimation.\n"
-        "- **Bonus perso** (si ton profil est chargé) : tes victoires au-delà de ce que tes drafts "
-        "laissaient attendre sur ce champion. Il est volontairement prudent : l'écart réel entre "
-        "joueurs sur un même champion est de quelques points, et il faut des centaines de "
-        "parties pour le distinguer du hasard.\n\n"
-        "Les écarts sont de quelques points : la draft compte, mais moins que l'exécution. "
-        "Les winrates d'un champion sont mesurés sur ceux qui le jouent : un pick de niche "
-        "(ex. un mage en ADC) est surtout joué par des spécialistes, et son score ne s'applique "
-        "pas forcément à toi. Le filtre **Mon pool** est là pour ça."
+        "- **Si jamais joué** (sans profil chargé) : la même probabilité pour quelqu'un qui n'a "
+        "jamais joué ce champion. Les forces sont mesurées sur ceux qui le choisissent, souvent des "
+        "habitués ; le coût d'inexpérience, mesuré sur la base à joueur égal, est plus fort pour "
+        "les picks de niche (ex. un mage en ADC).\n"
+        "- **Bonus perso** (si ton profil est chargé) : ce que ton historique change, coût "
+        "d'inexpérience compris pour les champions que tu ne joues pas. Il est volontairement "
+        "prudent : l'écart réel entre joueurs sur un même champion est de quelques points, et il "
+        "faut des centaines de parties pour le distinguer du hasard.\n\n"
+        "Les écarts sont de quelques points : la draft compte, mais moins que l'exécution."
     )

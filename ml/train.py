@@ -34,7 +34,7 @@ from ml.draft_data import (
     ROLES, TIER_BUCKET_LABELS, TIER_TO_BUCKET, load_champion_ad_share, load_champion_names, load_matches,
     load_player_slots,
 )
-from ml.personal import estimate_tau, residuals
+from ml.personal import estimate_familiarity, estimate_tau, residuals, role_shares
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -174,9 +174,15 @@ def with_comp(model: AdditiveDraftModel, train: pd.DataFrame) -> AdditiveDraftMo
 def decide_comp(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
                 n_folds: int = 3, block: float = 0.1) -> dict:
     """
-    Les sensibilités par champion améliorent-elles les prédictions sur des parties
-    futures ? Même validation glissante que le réglage : elles ne sont adoptées
-    que si le gain moyen de log-loss sur les blocs de validation est positif.
+    Garde-fou des sensibilités par champion, sur la même validation glissante
+    que le réglage. Elles sont estimées par un lissage bayésien qui se règle
+    déjà sur la force des preuves : la validation sert à détecter un NUISIBLE
+    avéré, pas à départager le bruit. Elles ne sont donc rejetées que si elles
+    dégradent significativement les prédictions (gain + IC 95 % < 0).
+
+    (Règle précédente : adoptées si gain > 0. Avec des gains de ±0,00001 pour
+    un IC de ±0,00015, la décision basculait au hasard d'un entraînement à
+    l'autre : adoptées à 75k matchs, rejetées à 100k, adoptées à 155k.)
     """
     if hp.bal_scale <= 0 and hp.comp_scale <= 0:
         return {"adopted": False, "gain": 0.0, "ci95": 0.0}
@@ -187,9 +193,10 @@ def decide_comp(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
         diffs.append(log_losses(y, base.predict_proba(val)) - log_losses(y, with_comp(base, train).predict_proba(val)))
     d = np.concatenate(diffs)
     gain, ci = float(d.mean()), float(1.96 * d.std(ddof=1) / np.sqrt(len(d)))
+    adopted = gain + ci >= 0
     log.info("Sensibilités par champion en validation glissante : gain %+.5f ± %.5f → %s",
-             gain, ci, "adoptées" if gain > 0 else "non adoptées")
-    return {"adopted": gain > 0, "gain": gain, "ci95": ci}
+             gain, ci, "adoptées" if adopted else "rejetées (nuisibles)")
+    return {"adopted": adopted, "gain": gain, "ci95": ci}
 
 
 # ── Rapport sur le test ───────────────────────────────────────────────────────
@@ -291,6 +298,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-tier", choices=TIER_ORDER, default=None,
                    help="Ne garder que les matchs étiquetés à ce tier ou plus (exclut les matchs sans tier).")
     p.add_argument("--test-frac", type=float, default=0.15)
+    p.add_argument("--until", default=None, metavar="AAAA-MM-JJ",
+                   help="N'utiliser que les parties commencées avant cette date (UTC). Les parties "
+                        "postérieures restent scellées pour une évaluation finale avec ml/evaluate.py.")
     p.add_argument("--out", default=str(DATA_DIR / "additive_model.json"))
     return p.parse_args()
 
@@ -300,6 +310,8 @@ def main() -> None:
     t0 = time.time()
 
     df = load_matches()
+    if args.until:
+        df = df[df.game_creation < pd.Timestamp(args.until, tz="UTC").value // 1_000_000]
     if args.min_tier:
         allowed = TIER_ORDER[TIER_ORDER.index(args.min_tier):]
         df = df[df.source_tier.isin(allowed)]
@@ -307,10 +319,12 @@ def main() -> None:
 
     train_full, test = temporal_split(df, args.test_frac)
 
+    # Évaluation : profils de dégâts mesurés sans la période de test
+    eval_ad_share = load_champion_ad_share(before_ms=int(test.game_creation.min()))
+    hp = tune(train_full, eval_ad_share)
+    comp_decision = decide_comp(train_full, hp, eval_ad_share)
+    results = report(train_full, test, hp, eval_ad_share, use_comp=comp_decision["adopted"])
     ad_share = load_champion_ad_share()
-    hp = tune(train_full, ad_share)
-    comp_decision = decide_comp(train_full, hp, ad_share)
-    results = report(train_full, test, hp, ad_share, use_comp=comp_decision["adopted"])
 
     log.info("Entraînement final sur les %d matchs...", len(df))
     model = AdditiveDraftModel.fit(df, hp, ad_share)
@@ -321,8 +335,14 @@ def main() -> None:
             model.effects.update(comp_effects)
     model.attach_stats(df, load_champion_names())
     # Écart réel entre joueurs sur un même champion : a priori de la personnalisation
-    personal_tau = estimate_tau(residuals(model, df, load_player_slots()))
+    res = residuals(model, df, load_player_slots())
+    personal_tau = estimate_tau(res)
     log.info("τ personnel mesuré : %.3f logit", personal_tau)
+    # Coût d'inexpérience sur un champion, selon pick courant / de niche (a priori personnel)
+    familiarity = estimate_familiarity(res.assign(t=res.match_id.map(df.game_creation)), role_shares(model))
+    for kind, buckets in familiarity.items():
+        log.info("  familiarité, pick %-6s : %s", kind, ", ".join(
+            f"{b} {v['effect']:+.3f} ± {v['ci95']:.3f} (n={v['n']})" for b, v in sorted(buckets.items())))
 
     log.info("Calibration par tranche d'ELO (validation croisée sur les matchs étiquetés)...")
     tier_calibration = estimate_tier_calibration(df, hp, ad_share)
@@ -332,11 +352,13 @@ def main() -> None:
 
     model.meta = {
         "n_matches": len(df),
+        "blue_winrate": float(df.blue_win.mean()),
         "min_tier": args.min_tier,
         "date_range": [int(df.game_creation.min()), int(df.game_creation.max())],
         "patches": df.patch.value_counts().to_dict(),
         "test_results": results,
         "personal_tau": personal_tau,
+        "familiarity": familiarity,
         "tier_calibration": {b: c["scale"] for b, c in tier_calibration.items()},
         "tier_calibration_detail": tier_calibration,
         # Sensibilités au profil adverse : décision, a priori estimé et champions les mieux établis

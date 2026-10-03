@@ -7,15 +7,23 @@ chaque partie de ton historique, le modèle donne la proba de victoire p
 attendue POUR CETTE DRAFT ; le résidu (victoire − p) isole donc ton apport
 personnel, indépendamment de la qualité des drafts que tu as eues.
 
-Pour un champion c joué n fois, ton décalage de logit est estimé par :
+A priori : le coût (ou le gain) de familiarité. La force d'un champion est
+mesurée sur ceux qui le choisissent, souvent des habitués. Le modèle mesure à
+chaque entraînement (estimate_familiarity), à joueur égal, l'écart entre ce
+qu'un joueur obtient et ce que la draft laissait attendre selon le nombre de
+parties qu'il avait déjà sur ce champion : aucune, 1-2, 3 et plus. Cet écart
+est plus fort pour les picks de niche (un rôle qui représente moins de 10 % des
+parties du champion : Karthus ADC...), joués surtout par des spécialistes.
+Il sert de moyenne a priori μ du décalage personnel.
 
-    δ_c = Σ (y − p) / (Σ p(1 − p) + 1/τ²)
+Pour un champion c joué n fois, ton décalage de logit est alors :
 
-C'est l'estimation a posteriori (un pas de Newton depuis 0) d'un décalage
-propre à toi avec un a priori N(0, τ²) : avec peu de parties, δ reste près
-de 0 ; avec beaucoup, il tend vers ton écart réel. τ, l'écart typique réel
-entre joueurs sur un même champion, est mesuré sur toute la base
-(estimate_tau) à chaque entraînement du modèle.
+    δ_c = μ + (Σ (y − p) − μ · Σ p(1 − p)) / (Σ p(1 − p) + 1/τ²)
+
+Estimation a posteriori (un pas de Newton depuis μ) avec un a priori N(μ, τ²) :
+sans partie, δ = μ (le coût d'un champion jamais joué) ; avec beaucoup de
+parties, δ tend vers ton écart réel. τ, l'écart typique réel entre joueurs sur
+un même champion, est lui aussi mesuré sur la base (estimate_tau).
 """
 import math
 import sqlite3
@@ -34,6 +42,30 @@ from ml.draft_data import load_matches, load_player_slots
 
 DEFAULT_TAU: float = 0.3   # Utilisé si le modèle n'embarque pas de τ mesuré
 TAU_MIN_GAMES: int = 5     # Paires (joueur, champion) retenues pour mesurer τ
+
+FAMILIARITY_BUCKETS: tuple[str, ...] = ("none", "few", "regular")   # 0, 1-2, 3+ parties antérieures
+NICHE_ROLE_SHARE: float = 0.10       # Pick de niche : ce rôle fait moins de 10 % des parties du champion
+FAMILIARITY_MIN_HISTORY: int = 10    # Joueurs dont la base contient au moins 10 parties antérieures
+
+
+def familiarity_bucket(n_games: int) -> str:
+    return "none" if n_games == 0 else ("few" if n_games <= 2 else "regular")
+
+
+def role_shares(model: AdditiveDraftModel) -> dict[tuple[int, str], float]:
+    """(champion, rôle) → part des parties du champion jouées à ce rôle."""
+    totals: dict[int, int] = {}
+    for role_games in model.games.values():
+        for c, n in role_games.items():
+            totals[int(c)] = totals.get(int(c), 0) + n
+    return {
+        (int(c), role): n / totals[int(c)]
+        for role, role_games in model.games.items() for c, n in role_games.items()
+    }
+
+
+def is_niche(shares: dict[tuple[int, str], float], champ: int, role: str) -> bool:
+    return shares.get((champ, role), 0.0) < NICHE_ROLE_SHARE
 
 
 # ── Résidus joueur × champion ─────────────────────────────────────────────────
@@ -72,6 +104,42 @@ def estimate_tau(res: pd.DataFrame, min_games: int = TAU_MIN_GAMES) -> float:
     return math.sqrt(max(tau2, 1e-4))
 
 
+def estimate_familiarity(res: pd.DataFrame, shares: dict[tuple[int, str], float]) -> dict:
+    """
+    Écart (logit) entre résultat réel et prédiction de la draft selon la
+    familiarité du joueur avec le champion, à joueur égal.
+
+    `res` : résidus par (joueur, match) avec une colonne `t` (date). Seules les
+    parties ANTÉRIEURES comptent pour la familiarité (sinon biais de survie :
+    après une défaite sur un nouveau champion on le rejoue moins), et seuls les
+    joueurs dont la base contient au moins FAMILIARITY_MIN_HISTORY parties
+    antérieures sont retenus. Le résidu moyen de chaque joueur est retiré (son
+    niveau général), puis converti en logit (÷ p(1−p) moyen).
+
+    Returns:
+        {"common" | "niche": {bucket: {"effect", "ci95", "n"}}}
+    """
+    res = res.sort_values("t")
+    res = res.assign(
+        r=res.y - res.p,
+        prior_total=res.groupby("puuid").cumcount(),
+        prior_same=res.groupby(["puuid", "champion_id"]).cumcount(),
+    )
+    h = res[res.prior_total >= FAMILIARITY_MIN_HISTORY].copy()
+    h["r_within"] = h.r - h.groupby("puuid").r.transform("mean")
+    h["kind"] = ["niche" if is_niche(shares, c, pos) else "common" for c, pos in zip(h.champion_id, h.position)]
+    h["bucket"] = h.prior_same.map(familiarity_bucket)
+    out: dict = {"common": {}, "niche": {}}
+    for (kind, bucket), g in h.groupby(["kind", "bucket"]):
+        scale = float((g.p * (1 - g.p)).mean())
+        out[kind][bucket] = {
+            "effect": float(g.r_within.mean() / scale),
+            "ci95": float(1.96 * g.r_within.std(ddof=1) / np.sqrt(len(g)) / scale),
+            "n": int(len(g)),
+        }
+    return out
+
+
 # ── Profil d'un joueur ────────────────────────────────────────────────────────
 
 @dataclass
@@ -80,7 +148,8 @@ class ChampionProfile:
     games: int
     wins: int
     expected_wins: float                 # Victoires attendues d'après les drafts jouées
-    effect: float                        # δ (logit), déjà atténué
+    score: float                         # Σ (y − p) : victoires au-delà de l'attendu
+    information: float                   # Σ p(1 − p)
     games_by_role: dict[str, int] = field(default_factory=dict)
 
 
@@ -88,31 +157,62 @@ def player_profile(
     model: AdditiveDraftModel,
     puuid: str,
     db_path: Path = DB_PATH,
-    tau: Optional[float] = None,
 ) -> dict[int, ChampionProfile]:
     """Profil par champion du joueur, à partir de ses parties présentes en base."""
-    tau = tau or model.meta.get("personal_tau", DEFAULT_TAU)
     drafts = load_matches(db_path, puuid=puuid)
     if drafts.empty:
         return {}
-    return champion_profiles(residuals(model, drafts, load_player_slots(db_path, puuid=puuid)), tau)
+    return champion_profiles(residuals(model, drafts, load_player_slots(db_path, puuid=puuid)))
 
 
-def champion_profiles(res: pd.DataFrame, tau: float) -> dict[int, ChampionProfile]:
-    """Profils par champion à partir des résidus (y, p) d'un seul joueur."""
-    profiles = {}
-    for champ, grp in res.groupby("champion_id"):
-        s = float((grp.y - grp.p).sum())
-        v = float((grp.p * (1 - grp.p)).sum())
-        profiles[int(champ)] = ChampionProfile(
+def champion_profiles(res: pd.DataFrame) -> dict[int, ChampionProfile]:
+    """Statistiques suffisantes par champion à partir des résidus (y, p) d'un seul joueur."""
+    return {
+        int(champ): ChampionProfile(
             champion_id=int(champ),
             games=len(grp),
             wins=int(grp.y.sum()),
             expected_wins=float(grp.p.sum()),
-            effect=s / (v + 1 / tau ** 2),
+            score=float((grp.y - grp.p).sum()),
+            information=float((grp.p * (1 - grp.p)).sum()),
             games_by_role=grp.position.value_counts().to_dict(),
         )
-    return profiles
+        for champ, grp in res.groupby("champion_id")
+    }
+
+
+def prior_mean(model: AdditiveDraftModel, shares, champ: int, role: str, n_games: int) -> float:
+    """Coût / gain de familiarité mesuré (logit) ; 0 si le modèle n'en embarque pas."""
+    fam = model.meta.get("familiarity", {})
+    kind = "niche" if is_niche(shares, champ, role) else "common"
+    return float(fam.get(kind, {}).get(familiarity_bucket(n_games), {}).get("effect", 0.0))
+
+
+def personal_offsets(
+    model: AdditiveDraftModel,
+    role: str,
+    profiles: Optional[dict[int, ChampionProfile]] = None,
+    tau: Optional[float] = None,
+) -> dict[int, float]:
+    """
+    Décalage personnel δ (logit) de chaque champion jouable à `role`.
+
+    Sans profil (profiles=None), tous les champions sont traités comme « jamais
+    joués » : δ = coût d'inexpérience mesuré, ce que vaut le pick pour
+    quelqu'un qui ne le joue pas.
+    """
+    tau = tau or model.meta.get("personal_tau", DEFAULT_TAU)
+    shares = role_shares(model)
+    offsets = {}
+    for c in model.games.get(role, {}):
+        champ = int(c)
+        prof = (profiles or {}).get(champ)
+        mu = prior_mean(model, shares, champ, role, prof.games if prof else 0)
+        if prof is None:
+            offsets[champ] = mu
+        else:
+            offsets[champ] = mu + (prof.score - mu * prof.information) / (prof.information + 1 / tau ** 2)
+    return offsets
 
 
 # ── Collecte de l'historique ──────────────────────────────────────────────────
