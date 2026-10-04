@@ -164,6 +164,7 @@ logit P(victoire) = avantage de côté
                   + équilibre des dégâts de l'équipe
                   + sensibilité de certains champions au profil adverse
                   + écarts de force par tranche d'ELO      (quand les données les établissent)
+                  + évolution des forces de patch en patch (idem ; rejetée à ce jour)
 ```
 
 Chaque groupe d'effets a sa propre force de régularisation, choisie par

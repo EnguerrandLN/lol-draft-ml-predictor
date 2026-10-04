@@ -339,6 +339,44 @@ Prolongements : l'or à 10-15 minutes (endpoint *timeline*, hors contamination
 de fin de partie), le farm et les dégâts comme cibles auxiliaires
 supplémentaires, et la même idée pour les synergies (bot lane : part d'or du duo).
 
+## 13. Forces qui évoluent avec les patchs (`patch_transition.py`)
+
+Méthode (groupe « patch » du modèle) : marche aléatoire sur les patchs. La force
+de chaque champion évolue d'un patch à l'autre par incréments régularisés (L2) ;
+paramétrage inversé pour que « main » soit la force au dernier patch, si bien que
+le recommandeur raisonne directement au patch courant, sans modification.
+
+Simulation de sortie de patch : entraînement jusqu'au jour de sortie + 0, 1 ou
+3 jours, test sur les 5 jours suivants du nouveau patch. Gain de log-loss par
+rapport au modèle actuel :
+
+| | J+0 | J+1 | J+3 |
+|---|---|---|---|
+| 16.18, marche aléatoire (échelle 0,3) | 0,0000 | **+0,0002 ± 0,0001** | **+0,0002 ± 0,0001** |
+| 16.18, marche aléatoire (échelle 1,0) | 0,0000 | +0,0004 ± 0,0006 | +0,0004 ± 0,0006 |
+| 16.19, marche aléatoire (échelle 0,3) | 0,0000 | −0,0001 ± 0,0001 | −0,0001 ± 0,0002 |
+| 16.19, marche aléatoire (échelle 1,0) | −0,0001 | **−0,0013 ± 0,0006** | **−0,0013 ± 0,0005** |
+| Pondération de récence (demi-vie 14 j) | −0,0002 | −0,0003 | −0,0004 |
+
+- La pondération de récence nuit toujours (cohérent avec la validation).
+- La marche aléatoire aide à la sortie du 16.18 et nuit à celle du 16.19.
+  Explication vérifiée : la transition 16.19 est faussée par un changement de
+  **population** dans nos données. L'ancien crawl (BFS, sans tier) s'est arrêté
+  le 26/09, en plein 16.19 : 46 % des parties des premiers jours du 16.19 en
+  viennent, 0 % des jours de test, où le haut ELO passe de 15 % à 28 %. Les
+  « évolutions » apprises captaient en partie ce changement de joueurs. La
+  transition 16.18 (population stable : 35-40 % d'ancien crawl des deux côtés)
+  est le test propre.
+- Intégré au réglage automatique (`patch_scale`) ; la validation glissante le
+  rejette aujourd'hui (échelle 0,3 : +0,00003, sous le seuil de parcimonie).
+  **Le vrai test sera la sortie du 16.20**, avec des données homogènes (100 %
+  crawl par ladder) : relancer `experiments/patch_transition.py` en ajoutant la
+  transition, et l'entraînement décidera seul.
+
+Piste liée : traiter l'ancien crawl (sans tier) comme une population à part
+(écarts de force propres, comme une tranche d'ELO), pour que les changements de
+source de données ne se confondent plus avec les changements d'équilibrage.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
