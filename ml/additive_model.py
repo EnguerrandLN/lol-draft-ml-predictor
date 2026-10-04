@@ -21,6 +21,16 @@ additive_model.py — Modèle additif régularisé de victoire en draft.
            Émeraude-Diamant, Master+), ajouté à « main » pour les matchs dont le tier
            est connu. Fortement atténué vers 0 : il ne s'écarte de l'effet global que
            si la tranche fournit assez de matchs pour le justifier.
+  - patch : évolution de la force champion × rôle d'un patch à l'autre (marche
+           aléatoire). Paramétrage inversé : « main » est la force au DERNIER
+           patch ; une partie d'un patch plus ancien p est expliquée par
+               main − Σ_{patchs q postérieurs à p} incrément(q).
+           La L2 sur les incréments tire chaque champion vers « pas de
+           changement » : seuls ceux que les données montrent buffés ou nerfés
+           bougent, les autres gardent tout leur historique (contrairement à une
+           pondération des parties récentes, qui pénalise tout le monde). Une
+           draft du patch courant ou d'un patch futur n'a aucun terme « patch » :
+           le recommandeur raisonne directement au dernier patch connu.
 
 L'encodage est antisymétrique (bleu +1, rouge −1) : échanger les équipes inverse
 exactement la prédiction, hors avantage de côté.
@@ -47,7 +57,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml.draft_data import ROLES, TIER_TO_BUCKET
 
 DUO_PAIRS: tuple[tuple[str, str], ...] = (("BOTTOM", "UTILITY"), ("JUNGLE", "MIDDLE"), ("JUNGLE", "TOP"))
-GROUPS: tuple[str, ...] = ("main", "lane", "duo", "comp", "bal", "tier")
+GROUPS: tuple[str, ...] = ("main", "lane", "duo", "comp", "bal", "tier", "patch")
+MIN_PATCH_MATCHES: int = 2000   # Patchs plus petits rattachés au patch suivant suivi (plus ancien que tout)
 BALANCE_KEYS: tuple[str, str] = ("b|lin", "b|sq")
 
 
@@ -57,6 +68,27 @@ BALANCE_KEYS: tuple[str, str] = ("b|lin", "b|sq")
 
 def main_key(role: str, champ: int) -> str:
     return f"m|{role}|{champ}"
+
+
+def patch_key(patch: str, role: str, champ: int) -> str:
+    return f"p|{patch}|{role}|{champ}"
+
+
+def patch_order(patch: str) -> tuple[int, ...]:
+    """« 16.19 » → (16, 19) : ordre chronologique des patchs."""
+    return tuple(int(x) for x in str(patch).split(".") if x.isdigit())
+
+
+def tracked_patches(df: pd.DataFrame, min_matches: int = MIN_PATCH_MATCHES) -> list[str]:
+    """Patchs assez fournis pour suivre l'évolution des forces, du plus ancien au plus récent."""
+    counts = df.patch.value_counts()
+    return sorted((p for p, n in counts.items() if n >= min_matches), key=patch_order)
+
+
+def later_patches(patch: str, patches: list[str]) -> list[str]:
+    """Patchs suivis strictement postérieurs à `patch` (vide pour le dernier patch ou un patch futur)."""
+    order = patch_order(patch)
+    return [q for q in patches if patch_order(q) > order]
 
 
 def tier_key(bucket: str, role: str, champ: int) -> str:
@@ -113,12 +145,13 @@ class DamageProfile:
 
 
 def draft_terms(
-    df: pd.DataFrame, damage: Optional[DamageProfile] = None,
+    df: pd.DataFrame, damage: Optional[DamageProfile] = None, patches: Optional[list[str]] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Décompose chaque draft complète en termes (ligne, clé, valeur, groupe).
     Les colonnes attendues sont blue_<ROLE> / red_<ROLE>. Les termes « comp »
-    ne sont produits que si un profil de dégâts est fourni.
+    ne sont produits que si un profil de dégâts est fourni, les termes « patch »
+    que si une liste de patchs suivis est fournie et que df a une colonne patch.
     """
     n = len(df)
     rows_idx = np.arange(n)
@@ -143,6 +176,20 @@ def draft_terms(
             c1 = df[f"{side}_{r1}"].astype(int).to_numpy()
             c2 = df[f"{side}_{r2}"].astype(int).to_numpy()
             add([duo_key(r1, r2, a, b) for a, b in zip(c1, c2)], np.full(n, sign), "duo")
+
+    if patches and "patch" in df.columns:
+        later = {p: later_patches(p, patches) for p in df.patch.unique()}
+        match_later = [later[p] for p in df.patch]
+        idx = np.array([i for i, qs in enumerate(match_later) for _ in qs], dtype=int)
+        qs_flat = [q for qs in match_later for q in qs]
+        if len(idx):
+            for role in ROLES:
+                for side, sign in (("blue", 1.0), ("red", -1.0)):
+                    champs = df[f"{side}_{role}"].astype(int).to_numpy()[idx]
+                    rows.append(idx)
+                    keys.append(np.array([patch_key(q, role, c) for q, c in zip(qs_flat, champs)], dtype=object))
+                    vals.append(np.full(len(idx), -sign))   # force à ce patch = main − incréments postérieurs
+                    groups.append(np.full(len(idx), "patch", dtype=object))
 
     if "source_tier" in df.columns:
         buckets = df.source_tier.map(TIER_TO_BUCKET).to_numpy()
@@ -187,11 +234,13 @@ class Hyperparams:
     comp_scale: float = 0.0
     bal_scale: float = 0.0
     tier_scale: float = 0.0
+    patch_scale: float = 0.0
     half_life_days: float | None = None
 
     def scales(self) -> dict[str, float]:
         return {"main": 1.0, "lane": self.lane_scale, "duo": self.duo_scale,
-                "comp": self.comp_scale, "bal": self.bal_scale, "tier": self.tier_scale}
+                "comp": self.comp_scale, "bal": self.bal_scale, "tier": self.tier_scale,
+                "patch": self.patch_scale}
 
 
 @dataclass
@@ -205,6 +254,7 @@ class AdditiveDraftModel:
     champion_names: dict[str, str] = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
     damage: Optional[DamageProfile] = None
+    patches: list[str] = field(default_factory=list)   # Patchs suivis (groupe « patch »), du plus ancien au plus récent
 
     # ── Entraînement ──────────────────────────────────────────────────────────
 
@@ -217,7 +267,8 @@ class AdditiveDraftModel:
 
         uses_damage = hp.comp_scale > 0 or hp.bal_scale > 0
         damage = DamageProfile.fit(df, ad_share) if (ad_share and uses_damage) else None
-        rows, keys, vals, groups = draft_terms(df, damage)
+        patches = tracked_patches(df) if (hp.patch_scale > 0 and "patch" in df.columns) else []
+        rows, keys, vals, groups = draft_terms(df, damage, patches)
         scales = hp.scales()
         keep = np.array([scales[g] > 0 for g in groups])
         rows, keys, vals, groups = rows[keep], keys[keep], vals[keep], groups[keep]
@@ -236,12 +287,13 @@ class AdditiveDraftModel:
             effects={k: float(e) for k, e in zip(vocab, effects) if e != 0.0},
             hyperparams=hp,
             damage=damage,
+            patches=patches,
         )
 
     # ── Prédiction sur drafts complètes ───────────────────────────────────────
 
     def predict_logit(self, df: pd.DataFrame) -> np.ndarray:
-        rows, keys, vals, _ = draft_terms(df, self.damage)
+        rows, keys, vals, _ = draft_terms(df, self.damage, self.patches)
         contrib = vals * np.array([self.effects.get(k, 0.0) for k in keys])
         return self.intercept + np.bincount(rows, weights=contrib, minlength=len(df))
 
@@ -291,6 +343,7 @@ class AdditiveDraftModel:
             "pick_rate": self.pick_rate,
             "pick_rate_by_tier": self.pick_rate_by_tier,
             "champion_names": self.champion_names,
+            "patches": self.patches,
             "damage": None if self.damage is None else {
                 "ad_share": {str(c): v for c, v in self.damage.ad_share.items()},
                 "mean": self.damage.mean,
@@ -314,6 +367,7 @@ class AdditiveDraftModel:
             pick_rate_by_tier=d.get("pick_rate_by_tier", {}),
             champion_names=d["champion_names"],
             meta=d["meta"],
+            patches=d.get("patches", []),
             damage=None if dmg is None else DamageProfile(
                 {int(c): v for c, v in dmg["ad_share"].items()}, dmg["mean"], dmg["std"],
                 dmg.get("lo"), dmg.get("hi"),

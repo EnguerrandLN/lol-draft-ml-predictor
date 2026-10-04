@@ -17,6 +17,7 @@ notable (|effet| > 0.01 dans la méthode évaluée) est présent ; IC 95 % appar
 Usage : python experiments/comp_effects_validation.py
 """
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -94,7 +95,7 @@ def evaluate(train, test, hp, ad_share) -> None:
     print(f"  entraînement {len(train)} matchs → test {len(test)} matchs")
     for label, method in METHODS.items():
         effects, _ = method(base, train)
-        model = AdditiveDraftModel(base.intercept, {**base.effects, **effects}, hp, damage=base.damage)
+        model = replace(base, effects={**base.effects, **effects})
         diff = ll_base - log_losses(y, model.predict_proba(test))
         notable = {int(k.split("|")[1]) for k, e in effects.items() if abs(e) > 0.01}
         mask = np.any([test[f"{s}_{r}"].isin(notable) for s in ("blue", "red") for r in ROLES], axis=0)

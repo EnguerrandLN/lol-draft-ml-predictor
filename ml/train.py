@@ -18,6 +18,7 @@ import argparse
 import logging
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -156,6 +157,7 @@ def tune(df: pd.DataFrame, ad_share: dict[int, float], n_folds: int = 3, block: 
     try_grid("C", C_GRID, min_gain=1e-6)
     try_grid("bal_scale", SCALE_GRID)
     try_grid("tier_scale", SCALE_GRID)
+    try_grid("patch_scale", SCALE_GRID)   # Évolution des forces de patch en patch (voir additive_model)
     # Les sensibilités par champion (« comp ») ne passent pas par la L2 : elles sont
     # lissées après coup par fit_comp_effects, puis adoptées ou non par decide_comp.
     try_grid("lane_scale", SCALE_GRID)
@@ -170,7 +172,7 @@ def tune(df: pd.DataFrame, ad_share: dict[int, float], n_folds: int = 3, block: 
 def with_comp(model: AdditiveDraftModel, train: pd.DataFrame) -> AdditiveDraftModel:
     """Copie du modèle enrichie des sensibilités par champion lissées, estimées sur `train`."""
     effects, _ = fit_comp_effects(model, train)
-    return AdditiveDraftModel(model.intercept, {**model.effects, **effects}, model.hyperparams, damage=model.damage)
+    return replace(model, effects={**model.effects, **effects})
 
 
 def decide_comp(df: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float],
@@ -206,7 +208,7 @@ def with_extra_effects(model: AdditiveDraftModel, extra: dict[str, float]) -> Ad
     effects = dict(model.effects)
     for key, value in extra.items():
         effects[key] = effects.get(key, 0.0) + value
-    return AdditiveDraftModel(model.intercept, effects, model.hyperparams, damage=model.damage)
+    return replace(model, effects=effects)
 
 
 def base_with_layers(train: pd.DataFrame, hp: Hyperparams, ad_share: dict[int, float], use_comp: bool):
@@ -387,8 +389,7 @@ def main() -> None:
     lane_info = {"adopted": False}
     if lane_decision["adopted"]:
         extra, beta, settings = lane_stat_layer(df, targets, model.predict_logit(df))
-        model = AdditiveDraftModel(model.intercept, with_extra_effects(model, extra).effects,
-                                   model.hyperparams, damage=model.damage)
+        model = with_extra_effects(model, extra)
         lane_info = {"adopted": True, "beta": beta, "settings": settings}
         log.info("Matchups appris sur la part d'or : β = %.3f, réglages %s", beta, settings)
     model.attach_stats(df, load_champion_names())
