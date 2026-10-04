@@ -171,5 +171,7 @@ Chaque groupe d'effets a sa propre force de régularisation, choisie par
 validation : les effets peu mesurables sont automatiquement ramenés vers zéro
 et gagnent en poids à mesure que les données s'accumulent. Pour une draft
 partielle, chaque slot encore vide est remplacé par la distribution des picks
-habituels du rôle ; le modèle étant additif, l'espérance de victoire est
-calculée exactement.
+habituels du rôle (dans ta tranche d'ELO) ; le modèle étant additif,
+l'espérance de victoire est calculée exactement. Supposer que le vis-à-vis
+choisit indépendamment de ton pick est vérifié sur les données : en solo
+queue, les counter-picks déplacent la proba de moins de 0,2 point.

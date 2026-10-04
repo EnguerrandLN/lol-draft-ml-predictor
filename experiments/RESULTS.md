@@ -377,6 +377,50 @@ Piste liée : traiter l'ancien crawl (sans tier) comme une population à part
 (écarts de force propres, comme une tranche d'ELO), pour que les changements de
 source de données ne se confondent plus avec les changements d'équilibrage.
 
+## 14. Prédire les picks à partir du reste de la draft (`pick_model.py`, `pick_model_win.py`) — négatif
+
+Le recommandeur remplace chaque slot encore vide par les pick rates du rôle,
+comme si le vis-à-vis choisissait sans regarder ton pick. Méthode : un petit
+Transformer de type BERT (10 jetons champion × position, plus tranche d'ELO et
+patch) apprend à retrouver des slots masqués, sur 130k drafts. L'API ne donne
+pas l'ordre des picks : il apprend quels champions vont ensemble.
+
+**Étape 1 : prédire les vrais picks** (test : 22 874 matchs futurs, k des 9
+autres slots visibles, k uniforme de 0 à 9 ; log-vraisemblance du vrai
+champion, champions visibles et bannis exclus) :
+
+| Méthode | NLL (nats) | Perplexité | Gain |
+|---|---|---|---|
+| Pick rates globaux | 3,803 | 44,8 | −0,049 ± 0,002 |
+| Pick rates par tier (recommandeur) | 3,753 | 42,7 | +0,000 ± 0,001 |
+| Pick rates du patch par tier, lissés | 3,754 | 42,7 | référence |
+| **Transformer** | **3,731** | **41,7** | **+0,023 ± 0,001** |
+
+- Le tier compte beaucoup ; le patch courant n'apporte rien de plus.
+- Le gain croît avec le nombre de picks visibles (+0,011 à 1-4, +0,050 à 9)
+  et vient surtout du duo bot (ADC, support : +0,04). Faible au top (+0,007).
+
+**Étape 2 : effet sur la proba de victoire d'une draft incomplète** (23 548
+matchs futurs, une équipe, k slots visibles parmi 10, k uniforme de 1 à 9 ;
+modèle de victoire actuel entraîné sur les mêmes parties) :
+
+| | Gain |
+|---|---|
+| Écart² au logit de la draft complète (0,0275 avec les pick rates) | +0,00025 ± 0,00004 (−0,9 %) |
+| Log-loss du résultat réel | −0,00002 ± 0,00006 |
+
+Premier pick top à l'aveugle (tier MID) : classement quasi identique, écarts
+≤ 0,2 point. Contrôle sans modèle, sur tous les matchs : avec la vraie
+distribution des vis-à-vis de chaque champion au lieu des pick rates, ses
+matchups changent de ± 0,19 pt au top (écart-type entre champions ; bruit
+0,03), ± 0,07 au mid et ± 0,02 au bot. Les exceptions sont des champions eux-mêmes choisis en
+counter-pick (Sylas top +1,2 pt, Kayle +0,2), pas des picks contrés.
+
+- **Conclusion : en solo queue, les joueurs counter-pickent peu.
+  L'hypothèse d'indépendance du recommandeur est juste à 0,2 point près.**
+  Le modèle de picks apprend une structure réelle (accords ADC-support) mais
+  elle ne change pas les recommandations. Non intégré (parcimonie).
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
