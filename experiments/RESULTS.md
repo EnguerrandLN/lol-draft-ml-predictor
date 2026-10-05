@@ -421,6 +421,44 @@ counter-pick (Sylas top +1,2 pt, Kayle +0,2), pas des picks contrés.
   Le modèle de picks apprend une structure réelle (accords ADC-support) mais
   elle ne change pas les recommandations. Non intégré (parcimonie).
 
+## 15. Piste 1 prolongée : autres cibles et synergies de duo (`lane_stats_extended.py`, 164k matchs) — négatif
+
+Même méthode que la section 12 (ridge sur une cible auxiliaire, scores
+cross-fittés, transfert par régression logistique à offset), avec :
+  - d'autres statistiques de lane comme cibles, toutes en part de l'équipe :
+    farm (sbires tués), dégâts aux champions, morts ;
+  - les synergies de duo apprises sur la part d'or du duo, par exemple
+    (ADC + support) / équipe. Ridge sur les forces des deux champions et
+    l'effet propre de la paire, transférable aux effets de duo du modèle.
+
+Gain de log-loss par rapport au modèle actuel (avec ses matchups appris sur la
+part d'or), coefficients de transfert estimés ensemble :
+
+| Ajout | Fenêtre récente | Fenêtre précédente |
+|---|---|---|
+| Farm | −0,00003 ± 0,00005 | +0,00000 ± 0,00005 |
+| Dégâts aux champions | +0,00024 ± 0,00024 | +0,00001 ± 0,00025 |
+| Morts | −0,00000 ± 0,00001 | −0,00000 ± 0,00005 |
+| Duo ADC-support | −0,00005 ± 0,00024 | +0,00013 ± 0,00028 |
+| Duos jungle-mid, jungle-top | 0 (effet de paire réglé à 0) | 0 |
+| Tout | +0,00015 ± 0,00035 | +0,00013 ± 0,00038 |
+
+- Les autres statistiques sont des variantes de la même information : leurs
+  scores de matchups sont corrélés à 0,74-0,80 avec celui de la part d'or
+  (farm, dégâts). Avec les dégâts, le transfert se répartit entre les deux
+  scores sans gain reproduit.
+- Synergies ADC-support : des paires cohérentes et stables d'une fenêtre à
+  l'autre (Samira + Nautilus, Lucian + Milio en tête des deux ; Yuumi avec les
+  ADC peu mobiles Jhin, Jinx, Kai'Sa en queue), mais sans gain mesurable sur
+  la prédiction des victoires.
+- Jungle-mid, jungle-top : la part d'or du duo ne dépend pas de la paire
+  (validation interne : effet de paire nul).
+- **Conclusion : la part d'or de fin de partie contient déjà l'information
+  utile des statistiques de fin de partie.** Rien d'intégré. Prolongement
+  restant : l'or à 10-15 minutes (endpoint *timeline*), qui isole la phase de
+  lane au lieu de la mélanger avec le reste de la partie ; il coûte une
+  requête d'API de plus par match.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
