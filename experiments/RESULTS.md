@@ -481,6 +481,41 @@ calibration par ELO se resserrent vers 1 avec le volume (Master+ : 24k → 44k
 matchs). Recommandation contre une composition full AD : Malphite 1er, puis
 Kled et Cassiopeia.
 
+## 17. Matchups appris sur l'or à 10 et 15 minutes (`lane_gold_early.py`, 20k timelines) — négatif
+
+Données : timelines de 20 000 matchs tirés au hasard sur les 30 derniers
+jours (`fetch_timelines.py`, ~1 760 par heure avec une clé de développement).
+Cibles par rôle : part d'or de l'équipe et écart d'or du duel de lane, à 10 et
+15 minutes. Même méthode que la section 12 ; les modèles de lane apprennent
+sur les matchs d'entraînement qui ont une timeline (13 à 17k), leurs scores
+s'appliquent à toutes les drafts (cross-fittés pour l'échantillon).
+
+Gain de log-loss sur des parties futures (28,8k matchs par fenêtre) :
+
+| Matchups appris sur… | Fenêtre récente | Fenêtre précédente |
+|---|---|---|
+| Or de fin de partie, même échantillon | +0,00022 ± 0,00019 | +0,00010 ± 0,00019 |
+| Part d'or à 10 min | +0,00023 ± 0,00019 | +0,00014 ± 0,00018 |
+| Écart d'or à 10 min | +0,00030 ± 0,00020 | +0,00012 ± 0,00019 |
+| Part d'or à 15 min | +0,00021 ± 0,00018 | +0,00012 ± 0,00018 |
+| Écart d'or à 15 min | +0,00030 ± 0,00024 | −0,00003 ± 0,00021 |
+| **Or de fin de partie, tous les matchs (actuel)** | **+0,00082 ± 0,00045** | **+0,00092 ± 0,00044** |
+| En plus de l'actuel : meilleure cible précoce | +0,00002 ± 0,00004 | −0,00000 ± 0,00003 |
+
+- À volume égal, l'or précoce ne fait pas mieux que l'or de fin de partie
+  (écarts de ±0,0001, dans le bruit) : ce n'est pas un signal plus riche par
+  match.
+- Le volume compte bien plus que la cible : la couche actuelle, apprise sur
+  ~150k matchs, apporte 3 à 6 fois plus que n'importe quelle cible apprise
+  sur 15k. Égaler ce volume en timelines demanderait ~85 h de collecte, pour
+  un signal équivalent à celui qu'on a déjà gratuitement.
+- Ajoutés à la couche actuelle, les matchups précoces n'apportent rien.
+- Les matchups précoces les plus marqués sont plausibles (Fiora et Irelia
+  contre Yone à 10 min, Katarina contre Syndra), mais bruités à ce volume.
+- **Conclusion : on arrête la collecte de timelines pour ce modèle.** L'outil
+  (`fetch_timelines.py`, tables `timelines` et `timeline_frames`) reste
+  disponible.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
