@@ -459,6 +459,28 @@ part d'or), coefficients de transfert estimés ensemble :
   lane au lieu de la mélanger avec le reste de la partie ; il coûte une
   requête d'API de plus par match.
 
+## 16. Point à 192k matchs (05/10)
+
+**Réentraînement complet** (192k matchs exploitables, 141k étiquetés par tier).
+Mêmes réglages retenus qu'à 152k (C 0,01 ; lane 0,5 ; duo 0,3 ; équilibre
+0,15 ; tier 0,3) ; couche patch toujours rejetée (le vrai test reste le 16.20).
+
+| | 152k | 192k |
+|---|---|---|
+| Matchups appris sur l'or (validation glissante) | +0,00065 ± 0,00034 | **+0,00090 ± 0,00034** |
+| Sensibilités par champion (validation) | +0,00001 | +0,00007 ± 0,00011 |
+| Calibration Master+ | 0,76 | 0,89 |
+| Calibration Émeraude-Diamant / Gold-Platine | 0,94 / 1,03 | 1,01 / 0,98 |
+| Test : gain vs constante | +0,0056 ± 0,0014 | +0,0053 ± 0,0013 |
+| Test : précision | 54,4 % | 54,2 % |
+
+Les fenêtres de test diffèrent (29/09-03/10 contre 01/10-05/10) : les deux
+modèles sont équivalents au test, dans l'IC. Sur la nouvelle fenêtre, les
+matchups appris sur l'or apportent +0,0008 (0,0045 → 0,0053). Les écarts de
+calibration par ELO se resserrent vers 1 avec le volume (Master+ : 24k → 44k
+matchs). Recommandation contre une composition full AD : Malphite 1er, puis
+Kled et Cassiopeia.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
