@@ -380,6 +380,20 @@ class RiotApiClient:
         url = f"{self.region_url}/lol/match/v5/matches/{match_id}"
         return self._request(url)
 
+    def get_match_timeline(self, match_id: str) -> Optional[dict]:
+        """
+        Récupère la chronologie d'un match via Match-V5 : une image par minute
+        (or, XP, farm, dégâts de chaque joueur) et les événements de la partie.
+
+        Args:
+            match_id: Identifiant du match (ex: "EUW1_7123456789").
+
+        Returns:
+            dict de la timeline ou None si introuvable.
+        """
+        url = f"{self.region_url}/lol/match/v5/matches/{match_id}/timeline"
+        return self._request(url)
+
     def get_summoner_by_puuid(self, puuid: str) -> Optional[dict]:
         """
         Récupère les infos d'un invocateur par PUUID via Summoner-V4.

@@ -205,6 +205,84 @@ def mark_ladder_player_done(conn: sqlite3.Connection, puuid: str, crawled_at: in
     )
 
 
+# ── Timelines ─────────────────────────────────────────────────────────────────
+
+def timeline_frames(timeline: dict, minutes: tuple[int, ...]) -> list[tuple]:
+    """
+    État de chaque joueur aux minutes demandées, extrait d'une timeline Match-V5 :
+    (puuid, minute, or total, XP, niveau, sbires, monstres, dégâts aux champions).
+    L'image d'indice m est prise à m minutes ; une minute au-delà de la fin de la
+    partie est ignorée.
+    """
+    info = timeline.get("info", {})
+    puuids = {p["participantId"]: p["puuid"] for p in info.get("participants", [])}
+    if not puuids:  # Format sans info.participants : puuids dans l'ordre des participantId
+        puuids = {i + 1: puuid for i, puuid in enumerate(timeline.get("metadata", {}).get("participants", []))}
+    frames = info.get("frames", [])
+    rows = []
+    for minute in minutes:
+        if minute >= len(frames):
+            continue
+        for pid, f in frames[minute].get("participantFrames", {}).items():
+            puuid = puuids.get(int(pid))
+            if puuid is None:
+                continue
+            rows.append((
+                puuid, minute, f.get("totalGold"), f.get("xp"), f.get("level"),
+                f.get("minionsKilled"), f.get("jungleMinionsKilled"),
+                f.get("damageStats", {}).get("totalDamageDoneToChampions"),
+            ))
+    return rows
+
+
+def upsert_timeline(
+    conn: sqlite3.Connection, match_id: str, timeline: Optional[dict], minutes: tuple[int, ...]
+) -> int:
+    """
+    Enregistre les images demandées d'une timeline. Une timeline introuvable
+    (None) est mémorisée aussi, pour ne pas la redemander.
+
+    Returns:
+        Nombre de lignes (joueur × minute) enregistrées.
+    """
+    rows = timeline_frames(timeline, minutes) if timeline else []
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO timeline_frames (
+            match_id, puuid, minute, total_gold, xp, level,
+            minions_killed, jungle_minions_killed, damage_to_champions
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [(match_id, *row) for row in rows],
+    )
+    frame_count = len(timeline.get("info", {}).get("frames", [])) if timeline else 0
+    conn.execute(
+        "INSERT OR REPLACE INTO timelines (match_id, frame_count) VALUES (?, ?)", (match_id, frame_count)
+    )
+    return len(rows)
+
+
+def get_matches_without_timeline(
+    conn: sqlite3.Connection, since_ms: int, queue_id: int, limit: int
+) -> list[str]:
+    """Matchs de la file `queue_id` (hors remakes) depuis `since_ms` sans timeline demandée, au hasard."""
+    cur = conn.execute(
+        """
+        SELECT m.match_id FROM matches m LEFT JOIN timelines t USING (match_id)
+        WHERE t.match_id IS NULL AND m.queue_id = ? AND COALESCE(m.ended_early, 0) = 0
+          AND m.game_creation >= ?
+        ORDER BY RANDOM() LIMIT ?
+        """,
+        (queue_id, since_ms, limit),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def get_timeline_count(conn: sqlite3.Connection) -> int:
+    """Nombre de timelines récupérées (hors introuvables)."""
+    return conn.execute("SELECT COUNT(*) FROM timelines WHERE frame_count > 0").fetchone()[0]
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 def get_match_count(conn: sqlite3.Connection) -> int:

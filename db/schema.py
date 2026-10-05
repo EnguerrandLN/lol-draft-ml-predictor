@@ -3,6 +3,8 @@ db/schema.py — Création du schéma SQLite.
 
   matches (centre) ← bans, participants (faits)
   ladder_players    (file du crawler : joueurs échantillonnés par tier)
+  timelines ← timeline_frames (état de chaque joueur à quelques minutes,
+                               pour un échantillon de matchs : fetch_timelines.py)
 """
 import logging
 import sqlite3
@@ -92,6 +94,31 @@ CREATE TABLE IF NOT EXISTS ladder_players (
 );
 """
 
+_CREATE_TIMELINES: str = """
+CREATE TABLE IF NOT EXISTS timelines (
+    match_id     TEXT    PRIMARY KEY,
+    frame_count  INTEGER NOT NULL,   -- images (une par minute) ; 0 = timeline introuvable
+    fetched_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
+);
+"""
+
+_CREATE_TIMELINE_FRAMES: str = """
+CREATE TABLE IF NOT EXISTS timeline_frames (
+    match_id               TEXT    NOT NULL,
+    puuid                  TEXT    NOT NULL,   -- jointure avec participants (match_id, puuid)
+    minute                 INTEGER NOT NULL,   -- 10, 15, 20
+    total_gold             INTEGER,
+    xp                     INTEGER,
+    level                  INTEGER,
+    minions_killed         INTEGER,
+    jungle_minions_killed  INTEGER,
+    damage_to_champions    INTEGER,
+    PRIMARY KEY (match_id, puuid, minute),
+    FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
+);
+"""
+
 _INDICES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_bans_match         ON bans(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_match  ON participants(match_id);",
@@ -173,6 +200,8 @@ def init_db() -> sqlite3.Connection:
         _CREATE_BANS,
         _CREATE_PARTICIPANTS,
         _CREATE_LADDER_PLAYERS,
+        _CREATE_TIMELINES,
+        _CREATE_TIMELINE_FRAMES,
     ):
         conn.execute(stmt)
 

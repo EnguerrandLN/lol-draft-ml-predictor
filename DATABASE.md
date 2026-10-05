@@ -95,6 +95,29 @@ Joueurs échantillonnés dans le classement (environ 600 par division, de Gold
 (`pending` / `done`), `priority` (ordre aléatoire), `last_crawled_at` (epoch
 en secondes). Utile pour connaître le rang de ces joueurs ; à ne pas modifier.
 
+### `timelines` et `timeline_frames` — état des joueurs en cours de partie (échantillon)
+
+Remplies par `fetch_timelines.py` pour un **échantillon** de matchs (pas
+tous) : une requête d'API de plus par match, via l'endpoint *timeline* de
+Match-V5.
+
+- `timelines` : une ligne par match demandé (`match_id`, `frame_count` =
+  nombre d'images d'une minute, **0 = timeline introuvable**, `fetched_at`).
+- `timeline_frames` : une ligne par joueur et par minute retenue (**10, 15
+  et 20** ; une minute après la fin de la partie est absente). Colonnes :
+  `match_id`, `puuid`, `minute`, `total_gold`, `xp`, `level`,
+  `minions_killed`, `jungle_minions_killed`, `damage_to_champions`
+  (cumulés depuis le début de la partie).
+
+Jointure avec les joueurs par `(match_id, puuid)` :
+
+```sql
+SELECT p.team_id, p.position, p.champion_name, f.total_gold
+FROM timeline_frames f
+JOIN participants p ON p.match_id = f.match_id AND p.puuid = f.puuid
+WHERE f.minute = 15;
+```
+
 ### Tables héritées
 
 `crawl_queue` (ancien crawl en largeur, 285k puuids) et `summoner_cache`
