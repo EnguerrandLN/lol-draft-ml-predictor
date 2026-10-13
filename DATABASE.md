@@ -118,6 +118,22 @@ JOIN participants p ON p.match_id = f.match_id AND p.puuid = f.puuid
 WHERE f.minute = 15;
 ```
 
+### `mastery_snapshots` et `champion_mastery` — maîtrise des joueurs du ladder
+
+Remplies par `fetch_masteries.py` (Champion-Mastery-V4, une requête par joueur).
+C'est une **photo à une date** : la maîtrise inclut toutes les parties
+antérieures à `fetched_at`, toutes files confondues (normales, ARAM…).
+
+- `mastery_snapshots` : une ligne par joueur photographié (`puuid`,
+  `fetched_at` en epoch ms, `n_champions`, 0 possible).
+- `champion_mastery` : une ligne par joueur et par champion avec de la
+  maîtrise : `points` (cumulés), `level`, `last_play_time` (epoch ms de la
+  dernière partie sur ce champion). Un champion absent = jamais joué.
+
+**Piège** : pour expliquer une partie, n'utiliser que la maîtrise photographiée
+**avant** cette partie (`fetched_at < game_creation`), sinon la maîtrise
+contient la partie elle-même et les suivantes.
+
 ### Tables héritées
 
 `crawl_queue` (ancien crawl en largeur, 285k puuids) et `summoner_cache`

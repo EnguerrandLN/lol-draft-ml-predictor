@@ -106,3 +106,32 @@ class TestTimelineEndpoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMasteryStorage(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        with patch("db.schema.DB_PATH", Path(self.tmp.name) / "test.db"):
+            self.conn = init_db()
+        self.conn.executemany(
+            "INSERT INTO ladder_players (puuid, tier, division, priority) VALUES (?, 'GOLD', 'I', ?)",
+            [("A", 0.1), ("B", 0.2)],
+        )
+        self.conn.commit()
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_snapshot_replaces_previous_and_resumes(self) -> None:
+        from db.repository import get_mastery_count, get_players_without_mastery, upsert_masteries
+        self.assertEqual(sorted(get_players_without_mastery(self.conn, 10)), ["A", "B"])
+        upsert_masteries(self.conn, "A", [{"championId": 1, "championPoints": 500, "championLevel": 2,
+                                           "lastPlayTime": 1000}], fetched_at=5000)
+        upsert_masteries(self.conn, "A", [{"championId": 2, "championPoints": 70, "championLevel": 1}], fetched_at=6000)
+        upsert_masteries(self.conn, "B", [], fetched_at=6000)      # Joueur sans maîtrise : enregistré quand même
+        self.assertEqual(get_players_without_mastery(self.conn, 10), [])
+        self.assertEqual(get_mastery_count(self.conn), 2)
+        rows = self.conn.execute("SELECT champion_id, points FROM champion_mastery WHERE puuid = 'A'").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(2, 70)])     # La nouvelle photo remplace l'ancienne

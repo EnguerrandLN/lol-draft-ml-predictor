@@ -61,6 +61,7 @@ app.py               Application Streamlit (conseiller de draft)
 crawl.py             Collecte des matchs (crawler par ladder, tourne en continu)
 fetch_player.py      Import de l'historique complet d'un joueur
 fetch_timelines.py   Or, XP et farm à 10/15/20 min pour un échantillon de matchs
+fetch_masteries.py   Photo de la maîtrise de champions des joueurs du ladder
 config.py            Routing API, chemins, paramètres du crawler
 api/
   client.py          Client HTTP Riot (rate limiting, retries, erreurs de clé)
@@ -132,6 +133,14 @@ Récupère la chronologie de matchs déjà en base, pris au hasard sur les 30
 derniers jours, et en garde l'état de chaque joueur à 10, 15 et 20 minutes.
 Une requête par match, sur le même quota que le crawler : mieux vaut ne pas
 lancer les deux en même temps. Il reprend où il s'est arrêté.
+
+```bash
+python fetch_masteries.py
+```
+
+Photographie la maîtrise de champions de chaque joueur du ladder (une requête
+par joueur, sur un quota distinct de celui du crawler : les deux peuvent tourner
+ensemble). Elle ne sert qu'à expliquer les parties jouées après la photo.
 
 **Entraînement**
 

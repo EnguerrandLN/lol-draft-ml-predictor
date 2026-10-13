@@ -5,6 +5,8 @@ db/schema.py — Création du schéma SQLite.
   ladder_players    (file du crawler : joueurs échantillonnés par tier)
   timelines ← timeline_frames (état de chaque joueur à quelques minutes,
                                pour un échantillon de matchs : fetch_timelines.py)
+  mastery_snapshots ← champion_mastery (maîtrise des joueurs du ladder à une
+                               date donnée : fetch_masteries.py)
 """
 import logging
 import sqlite3
@@ -119,6 +121,26 @@ CREATE TABLE IF NOT EXISTS timeline_frames (
 );
 """
 
+_CREATE_MASTERY_SNAPSHOTS: str = """
+CREATE TABLE IF NOT EXISTS mastery_snapshots (
+    puuid        TEXT    PRIMARY KEY,
+    fetched_at   INTEGER NOT NULL,   -- epoch ms : la maîtrise est celle de cet instant
+    n_champions  INTEGER NOT NULL    -- champions avec de la maîtrise (0 possible)
+);
+"""
+
+_CREATE_CHAMPION_MASTERY: str = """
+CREATE TABLE IF NOT EXISTS champion_mastery (
+    puuid           TEXT    NOT NULL,
+    champion_id     INTEGER NOT NULL,
+    points          INTEGER NOT NULL,   -- points de maîtrise cumulés (toutes files)
+    level           INTEGER,
+    last_play_time  INTEGER,            -- epoch ms de la dernière partie sur ce champion
+    PRIMARY KEY (puuid, champion_id),
+    FOREIGN KEY (puuid) REFERENCES mastery_snapshots(puuid) ON DELETE CASCADE
+);
+"""
+
 _INDICES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_bans_match         ON bans(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_participants_match  ON participants(match_id);",
@@ -202,6 +224,8 @@ def init_db() -> sqlite3.Connection:
         _CREATE_LADDER_PLAYERS,
         _CREATE_TIMELINES,
         _CREATE_TIMELINE_FRAMES,
+        _CREATE_MASTERY_SNAPSHOTS,
+        _CREATE_CHAMPION_MASTERY,
     ):
         conn.execute(stmt)
 

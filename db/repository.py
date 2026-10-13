@@ -283,6 +283,49 @@ def get_timeline_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM timelines WHERE frame_count > 0").fetchone()[0]
 
 
+# ── Maîtrise ──────────────────────────────────────────────────────────────────
+
+def upsert_masteries(conn: sqlite3.Connection, puuid: str, masteries: list[dict], fetched_at: int) -> int:
+    """
+    Remplace la photo de maîtrise d'un joueur (ChampionMasteryDTO de l'API) prise à
+    `fetched_at` (epoch ms). Un joueur sans maîtrise est enregistré aussi.
+
+    Returns:
+        Nombre de champions enregistrés.
+    """
+    rows = [
+        (puuid, int(m["championId"]), int(m.get("championPoints", 0)), m.get("championLevel"), m.get("lastPlayTime"))
+        for m in masteries if m.get("championId") is not None
+    ]
+    conn.execute("DELETE FROM champion_mastery WHERE puuid = ?", (puuid,))
+    conn.execute(
+        "INSERT OR REPLACE INTO mastery_snapshots (puuid, fetched_at, n_champions) VALUES (?, ?, ?)",
+        (puuid, fetched_at, len(rows)),
+    )
+    conn.executemany(
+        "INSERT INTO champion_mastery (puuid, champion_id, points, level, last_play_time) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    return len(rows)
+
+
+def get_players_without_mastery(conn: sqlite3.Connection, limit: int) -> list[str]:
+    """Joueurs du ladder dont la maîtrise n'a pas encore été photographiée, au hasard."""
+    cur = conn.execute(
+        """
+        SELECT l.puuid FROM ladder_players l LEFT JOIN mastery_snapshots s USING (puuid)
+        WHERE s.puuid IS NULL ORDER BY RANDOM() LIMIT ?
+        """,
+        (limit,),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def get_mastery_count(conn: sqlite3.Connection) -> int:
+    """Nombre de joueurs dont la maîtrise est en base."""
+    return conn.execute("SELECT COUNT(*) FROM mastery_snapshots").fetchone()[0]
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 def get_match_count(conn: sqlite3.Connection) -> int:
