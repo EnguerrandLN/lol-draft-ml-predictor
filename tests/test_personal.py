@@ -80,6 +80,26 @@ class TestPersonal(unittest.TestCase):
         common = fam["niche"]   # shares vide → tout est « niche » ; seule la différence compte
         self.assertAlmostEqual(common["none"]["effect"] - common["regular"]["effect"], -0.5, delta=0.15)
 
+    def test_familiarity_not_attenuated_by_pool_breadth(self) -> None:
+        """Les joueurs qui changent souvent de champion sont aussi moins forts : le coût doit
+        rester mesuré à joueur égal (régression à effets fixes), pas atténué vers 0."""
+        rng = np.random.default_rng(3)
+        rows = []
+        for player in range(800):
+            main_share = float(rng.uniform(0.05, 0.95))
+            skill = 0.6 * (main_share - 0.5)             # Pool étroit ⇔ meilleur joueur
+            main, seen, t = int(rng.integers(0, 10)), {}, 0
+            for _ in range(40):
+                champ = main if rng.random() < main_share else int(rng.integers(10, 200))
+                prior = seen.get(champ, 0)
+                effect = skill + (-0.4 if prior == 0 else (0.0 if prior <= 2 else 0.1))
+                y = int(rng.random() < 1 / (1 + math.exp(-effect)))
+                rows.append({"puuid": player, "champion_id": champ, "position": "TOP", "p": 0.5, "y": y, "t": t})
+                seen[champ] = prior + 1
+                t += 1
+        fam = estimate_familiarity(pd.DataFrame(rows), shares={})["niche"]
+        self.assertAlmostEqual(fam["none"]["effect"] - fam["regular"]["effect"], -0.5, delta=0.08)
+
     def test_no_profile_gives_inexperience_prior(self) -> None:
         offsets = personal_offsets(model_with_familiarity(), "TOP")
         self.assertTrue(all(o == FAMILIARITY["common"]["none"]["effect"] for o in offsets.values()))

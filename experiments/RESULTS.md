@@ -516,6 +516,52 @@ Gain de log-loss sur des parties futures (28,8k matchs par fenêtre) :
   (`fetch_timelines.py`, tables `timelines` et `timeline_frames`) reste
   disponible.
 
+## 18. Validation de la personnalisation (`personal_validation.py`)
+
+Le décalage personnel de l'app (δ = μ + (S − μV)/(V + 1/τ²), μ = coût de
+familiarité, S et V sur l'historique du joueur avec le champion) n'avait jamais
+été testé hors échantillon. Protocole conforme à l'usage (profil figé à
+l'import) : modèle, τ et μ estimés avant une date de coupure ; profils des
+joueurs sur leurs parties d'avant ; test sur leurs parties d'après (joueurs
+ayant ≥ 10 parties avant). IC groupé par joueur. Pente b dans
+logit P = logit de la draft + b·décalage : 1 = bien dosé.
+
+**Diagnostic.** Coupure 30/09 (16 902 joueurs, 201 931 parties de test) :
+δ améliore la prédiction (+0,00047 ± 0,00011), surtout grâce à μ, mais μ est
+sous-dosé : pente 1,63 ± 0,22, et 1,85 ± 0,28 à joueur égal. Cause : μ était
+mesuré en retirant la moyenne de chaque joueur au résidu seulement ; les
+joueurs qui changent souvent de champion ont aussi une moyenne plus basse, ce
+qui ramène l'écart mesuré vers 0. Correction : régression à effets fixes joueur
+(on centre aussi les indicatrices de classe), effets recentrés. Test unitaire
+sur données simulées où l'ancienne méthode donne −0,35 au lieu de −0,5.
+
+| Coupure | | Gain de δ (app) | Pente δ | Pente μ à joueur égal |
+|---|---|---|---|---|
+| 30/09 | avant correction | +0,00047 ± 0,00011 | 1,24 ± 0,17 | 1,85 ± 0,28 |
+| 30/09 | après | **+0,00052 ± 0,00015** | **0,97 ± 0,13** | 1,31 ± 0,19 |
+| 25/09 | après | +0,00050 ± 0,00014 | 1,01 ± 0,14 | 1,40 ± 0,19 |
+
+- Par classe (30/09, après) : champion jamais joué +0,00129 ± 0,00036 ;
+  1-2 parties −0,00006 ; 3-9 +0,00014 ; 10+ +0,00058 ± 0,00032.
+- La partie « historique » de δ (au-delà de μ) apporte peu : +0,00007 ± 0,00006
+  et +0,00003 ± 0,00006, pente 0,79 ± 0,34 et 0,57 ± 0,35. Avec ~20 à 60
+  parties par joueur en base, l'historique d'un champion distingue mal le
+  talent du hasard (τ ≈ 0,14) ; le gros de l'apport est le coût d'inexpérience.
+- Reste à joueur égal une pente de 1,3-1,4 sur μ : le coût d'inexpérience est
+  peut-être encore un peu sous-estimé pour classer ses propres champions.
+- Limite : « jamais joué » = absent de l'historique analysé ; la maîtrise
+  (Champion-Mastery-V4) est affichée dans l'app mais pas utilisée.
+
+**Réentraînement à 211k matchs (13/10) avec la correction.** Coût de
+familiarité (logit) : pick courant aucune partie −0,083, 1-2 −0,026, 3+ +0,047 ;
+niche aucune −0,163, 1-2 −0,092, 3+ +0,039 (contre −0,059 et −0,125 « aucune »
+à 192k avec l'ancienne méthode). τ = 0,142. Réglages re-choisis par la
+validation : C 0,03 ; lane 0,3 ; duo 0,15 ; équilibre 0,5 ; tier 0,3 (variances
+a priori des matchups et duos quasi inchangées : s²C ≈ 0,0027 et 0,0007).
+Test (31 658 matchs, 03/10-07/10) : +0,00563 ± 0,00135, précision 54,5 %.
+Facteurs de calibration 0,82 (Master+) à 0,87 (Gold-Platine) : les effets sont
+un peu trop forts à tous les niveaux.
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue

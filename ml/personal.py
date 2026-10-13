@@ -113,8 +113,17 @@ def estimate_familiarity(res: pd.DataFrame, shares: dict[tuple[int, str], float]
     parties ANTÉRIEURES comptent pour la familiarité (sinon biais de survie :
     après une défaite sur un nouveau champion on le rejoue moins), et seuls les
     joueurs dont la base contient au moins FAMILIARITY_MIN_HISTORY parties
-    antérieures sont retenus. Le résidu moyen de chaque joueur est retiré (son
-    niveau général), puis converti en logit (÷ p(1−p) moyen).
+    antérieures sont retenus.
+
+    « À joueur égal » : régression à effets fixes joueur. On retire la moyenne de
+    chaque joueur au résidu ET aux indicatrices des classes (courant / niche ×
+    aucune / 1-2 / 3+ parties), puis moindres carrés. Ne retirer que la moyenne
+    du résidu atténuait les effets : les joueurs qui jouent souvent des
+    champions nouveaux ont aussi une moyenne plus basse, ce qui ramenait l'écart
+    vers 0 (vérifié hors échantillon, experiments/personal_validation.py : pente
+    1,85 ± 0,28 au lieu de 1). Les effets sont ensuite recentrés (moyenne nulle
+    sur les parties) : la force des champions du modèle est déjà mesurée sur le
+    mélange réel des joueurs qui les choisissent. Conversion en logit : ÷ p(1−p) moyen.
 
     Returns:
         {"common" | "niche": {bucket: {"effect", "ci95", "n"}}}
@@ -126,17 +135,33 @@ def estimate_familiarity(res: pd.DataFrame, shares: dict[tuple[int, str], float]
         prior_same=res.groupby(["puuid", "champion_id"]).cumcount(),
     )
     h = res[res.prior_total >= FAMILIARITY_MIN_HISTORY].copy()
-    h["r_within"] = h.r - h.groupby("puuid").r.transform("mean")
+    if h.empty:
+        return {"common": {}, "niche": {}}
     h["kind"] = ["niche" if is_niche(shares, c, pos) else "common" for c, pos in zip(h.champion_id, h.position)]
-    h["bucket"] = h.prior_same.map(familiarity_bucket)
+    h["cell"] = h.kind + "|" + h.prior_same.map(familiarity_bucket)
+    counts = h.cell.value_counts()
+    cells = list(counts.index)          # La plus fréquente en premier : référence de la régression
+    dummies = pd.get_dummies(h.cell)[cells].astype(float)
+
+    # Effets fixes joueur : tout est centré au sein de chaque joueur
+    x = (dummies - dummies.groupby(h.puuid).transform("mean")).to_numpy()[:, 1:]
+    y = (h.r - h.groupby("puuid").r.transform("mean")).to_numpy()
+    xtx = x.T @ x
+    beta = np.linalg.solve(xtx, x.T @ y) if len(cells) > 1 else np.zeros(0)
+    resid = y - x @ beta
+    dof = max(len(y) - h.puuid.nunique() - len(beta), 1)
+    se = np.sqrt(np.diag(np.linalg.inv(xtx)) * (resid @ resid) / dof) if len(cells) > 1 else np.zeros(0)
+
+    effects = pd.Series(np.r_[0.0, beta], index=cells)
+    effects -= (effects * counts[cells]).sum() / counts.sum()       # Moyenne nulle sur les parties
+    ci = pd.Series(np.r_[0.0, 1.96 * se], index=cells)
+    scale = float((h.p * (1 - h.p)).mean())
+
     out: dict = {"common": {}, "niche": {}}
-    for (kind, bucket), g in h.groupby(["kind", "bucket"]):
-        scale = float((g.p * (1 - g.p)).mean())
-        out[kind][bucket] = {
-            "effect": float(g.r_within.mean() / scale),
-            "ci95": float(1.96 * g.r_within.std(ddof=1) / np.sqrt(len(g)) / scale),
-            "n": int(len(g)),
-        }
+    for cell in cells:
+        kind, bucket = cell.split("|")
+        out[kind][bucket] = {"effect": float(effects[cell] / scale), "ci95": float(ci[cell] / scale),
+                             "n": int(counts[cell])}
     return out
 
 

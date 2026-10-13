@@ -10,14 +10,14 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
 
 ## Ce que le modèle sait faire (et pas encore)
 
-Évaluation sur les 15 % de parties les plus récentes (~23 000 matchs, 152k au total) :
+Évaluation sur les 15 % de parties les plus récentes (~31 600 matchs, 211k au total) :
 
 | Modèle | Log-loss | Précision |
 |---|---|---|
-| Constante (toujours ~50 %) | 0,6931 | 50 % |
-| Force champion × rôle seule | 0,6901 | 53,3 % ± 0,6 |
-| Modèle sans matchups appris sur l'or | 0,6886 | 54,1 % ± 0,6 |
-| **Modèle complet** | **0,6876** | **54,4 % ± 0,6** |
+| Constante (toujours ~50 %) | 0,6930 | 50,8 % |
+| Force champion × rôle seule | 0,6901 | 53,2 % ± 0,5 |
+| Modèle sans matchups appris sur l'or | 0,6885 | 54,3 % ± 0,5 |
+| **Modèle complet** | **0,6874** | **54,5 % ± 0,5** |
 
 - La draft seule explique peu du résultat en Ranked Solo (le reste, ce sont les
   joueurs) : ~54 % est proche du plafond connu pour ce type de prédiction. Un
@@ -32,11 +32,15 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
   force des preuves et leur stabilité dans le temps (lissage bayésien empirique,
   sans seuil ni réglage par champion).
 - **Coût d'inexpérience** : la force d'un champion est mesurée sur ceux qui le
-  choisissent. Pour quelqu'un qui ne l'a jamais joué, ~−1,3 pt sur un pick
-  courant et ~−3 pts sur un pick de niche (rôle < 10 % des parties du champion).
-  Appliqué automatiquement avec ton profil, affiché sinon (« Si jamais joué »).
-- **Selon le niveau** : en Master+, la draft pèse moins (facteur 0,76) ; l'app
-  applique les forces et la calibration de ton niveau, détecté depuis ton Riot ID.
+  choisissent. Pour quelqu'un qui ne l'a jamais joué, ~−2 pts sur un pick
+  courant et ~−4 pts sur un pick de niche (rôle < 10 % des parties du champion),
+  mesurés à joueur égal (régression à effets fixes). Appliqué automatiquement
+  avec ton profil, affiché sinon (« Si jamais joué »). Validé sur les parties
+  futures des joueurs : le décalage personnel améliore leur prédiction et il est
+  bien dosé (pente 0,97 ± 0,13).
+- **Selon le niveau** : l'app applique les forces, les picks courants et la
+  calibration de ton niveau (facteurs 0,82 à 0,87 aujourd'hui), détecté depuis
+  ton Riot ID.
 - **Counters appris sur les statistiques de lane** : le résultat d'une partie
   (1 bit) ne suffit pas à estimer ~15 000 matchups par rôle. Ils sont appris
   sur un signal continu, l'écart de part d'or entre les deux laners (tâche

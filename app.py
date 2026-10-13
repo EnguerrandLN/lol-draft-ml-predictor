@@ -235,9 +235,9 @@ if profiles:
             "Champions proposés", ["Tous", "Seulement ceux que je joue"], horizontal=True,
             help="« Tous » permet de découvrir un champion fort dans cette situation : ton historique "
                  "s'affiche en colonnes et ajuste les champions que tu joues déjà. Mesuré sur la "
-                 "base : un champion absent de tes ~20 dernières parties coûte ~1 à 1,5 pt par "
-                 "rapport à ton main, à niveau de joueur égal. Le coût d'une toute première "
-                 "partie n'est pas mesurable sans données de maîtrise.",
+                 "base, à niveau de joueur égal : un champion absent de ton historique coûte "
+                 "~2 pts sur un pick courant et ~4 pts sur un pick de niche. Ce coût est déjà "
+                 "compté dans « Bonus perso ».",
         ) == "Seulement ceux que je joue"
         if own_pool:
             min_own_games = st.slider("…avec au moins N parties à ce rôle", 1, 20, 3)
