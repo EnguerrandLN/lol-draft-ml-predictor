@@ -8,6 +8,9 @@ __pycache__/
 *.db-shm
 *.db-wal
 
+# Modèles d'évaluation scellée (régénérables avec ml/train.py --until)
+data/model_sealed*.json
+
 # Modèles PyTorch des expériences (régénérables)
 *.pt
 

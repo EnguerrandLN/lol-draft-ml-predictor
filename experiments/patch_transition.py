@@ -9,15 +9,16 @@ tous les patchs : il reste en retard sur ces changements. Deux remèdes :
     chaque champion évolue par incréments régularisés ; seuls ceux que les
     données montrent modifiés bougent.
 
-Protocole : pour les transitions 16.17 → 16.18 (10/09) et 16.18 → 16.19 (23/09),
+Protocole : pour les transitions 16.17 → 16.18 (10/09), 16.18 → 16.19 (23/09) et 16.19 → 16.20 (07/10),
 on se place au jour de sortie, puis 1 et 3 jours après (données du nouveau
 patch déjà disponibles), on entraîne sur tout ce qui précède et on teste sur
 les 5 jours suivants du nouveau patch. Toutes les variantes sont affichées
 (pas de sélection a posteriori sur le test). Modèle de base sans les couches
 additionnelles (sensibilités, matchups appris sur l'or) pour isoler l'effet.
 
-Usage : python experiments/patch_transition.py
+Usage : python experiments/patch_transition.py [--patches 16.20]
 """
+import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -32,7 +33,7 @@ from ml.additive_model import AdditiveDraftModel
 from ml.draft_data import load_champion_ad_share, load_matches
 from ml.train import log_losses
 
-TRANSITIONS = {"16.18": "2026-09-10", "16.19": "2026-09-23"}
+TRANSITIONS = {"16.18": "2026-09-10", "16.19": "2026-09-23", "16.20": "2026-10-07"}
 DELAYS_DAYS = (0, 1, 3)
 TEST_DAYS = 5
 
@@ -44,6 +45,9 @@ def ms(day: str, plus_days: float = 0) -> int:
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--patches", nargs="+", default=list(TRANSITIONS), choices=list(TRANSITIONS))
+    args = ap.parse_args()
     hp = replace(AdditiveDraftModel.load(DATA_DIR / "additive_model.json").hyperparams, patch_scale=0.0)
     variants = {
         "récence (demi-vie 14 j)": replace(hp, half_life_days=14),
@@ -54,7 +58,7 @@ def main() -> None:
     df = load_matches()
     print(f"Base : {hp}\nGain de log-loss par rapport au modèle actuel (+ = mieux), test = {TEST_DAYS} jours suivants :")
 
-    for patch, start in TRANSITIONS.items():
+    for patch, start in ((p, TRANSITIONS[p]) for p in args.patches):
         for delay in DELAYS_DAYS:
             cutoff = ms(start, delay)
             train = df[df.game_creation < cutoff]

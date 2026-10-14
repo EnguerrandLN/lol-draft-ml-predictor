@@ -156,8 +156,11 @@ nouveau modèle automatiquement. À relancer régulièrement pendant le crawl
 (~20 min à 150k matchs).
 
 **Évaluation scellée** : les fenêtres de test de `train.py` ont servi aux choix
-de conception, leurs chiffres sont donc un peu optimistes. Pour une mesure
-honnête, entraîner jusqu'à une date puis évaluer une seule fois après :
+de conception, leurs chiffres pouvaient donc être optimistes. Pour une mesure
+honnête, entraîner jusqu'à une date puis évaluer une seule fois après. Faite sur
+le patch 16.20 (22 332 parties jamais regardées) : gain de log-loss
++0,0054 ± 0,0014, précision 54,2 %, bien calibré, en ligne avec les tests
+internes (détail dans `experiments/RESULTS.md`, section 19).
 
 ```bash
 python ml/train.py --until 2026-10-08 --out data/model_sealed.json

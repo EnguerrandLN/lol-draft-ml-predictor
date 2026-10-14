@@ -373,6 +373,21 @@ rapport au modèle actuel :
   crawl par ladder) : relancer `experiments/patch_transition.py` en ajoutant la
   transition, et l'entraînement décidera seul.
 
+**Le test du 16.20 (14/10) : négatif.** Données homogènes (100 % crawl par
+ladder), 23,5k parties du 16.20, test sur les 5 jours suivants :
+
+| | J+0 | J+1 | J+3 |
+|---|---|---|---|
+| Marche aléatoire (échelle 0,3) | +0,00014 ± 0,00030 | −0,00041 ± 0,00040 | 0,00000 ± 0,00055 |
+| Marche aléatoire (échelle 1,0) | +0,00007 ± 0,00048 | **−0,00534 ± 0,00141** | **−0,00306 ± 0,00155** |
+| Récence (demi-vie 14 j) | −0,00031 | −0,00041 | −0,00016 |
+
+Avec 1 à 3 jours du nouveau patch (2,4k à 8k parties), l'évolution propre à
+chaque champion est noyée dans le bruit : la marche aléatoire n'aide pas, et
+nuit nettement peu régularisée. Bilan sur trois sorties de patch : +0,0002
+(16.18), test faussé (16.19), nul à négatif (16.20). La couche reste dans le
+code, rejetée par la validation ; plus de suivi spécifique.
+
 Piste liée : traiter l'ancien crawl (sans tier) comme une population à part
 (écarts de force propres, comme une tranche d'ELO), pour que les changements de
 source de données ne se confondent plus avec les changements d'équilibrage.
@@ -561,6 +576,33 @@ a priori des matchups et duos quasi inchangées : s²C ≈ 0,0027 et 0,0007).
 Test (31 658 matchs, 03/10-07/10) : +0,00563 ± 0,00135, précision 54,5 %.
 Facteurs de calibration 0,82 (Master+) à 0,87 (Gold-Platine) : les effets sont
 un peu trop forts à tous les niveaux.
+
+## 19. Évaluation scellée sur le patch 16.20 (14/10)
+
+Préparée depuis l'audit (section 11) : toutes les décisions de conception ont
+été prises en regardant les mêmes fenêtres de test, donc leurs chiffres
+pouvaient être optimistes. Modèle entraîné et réglé uniquement sur les parties
+d'avant le 07/10 (`train.py --until 2026-10-07`), évalué **une seule fois** sur
+toutes les parties du 07/10 au 14/10 : 22 332 parties, dont 22 177 du 16.20,
+un patch qu'aucune décision n'avait regardé.
+
+| Tranche | Parties | Gain de log-loss vs constante | Précision |
+|---|---|---|---|
+| **Toutes** | 22 332 | **+0,00537 ± 0,00139** | **54,2 %** |
+| Gold-Platine et moins | 6 552 | +0,00590 ± 0,00269 | 54,4 % |
+| Émeraude-Diamant | 9 132 | +0,00491 ± 0,00226 | 53,8 % |
+| Master+ | 6 648 | +0,00549 ± 0,00226 | 54,5 % |
+
+- **Le chiffre honnête confirme les tests internes** : +0,0054 contre
+  +0,0058 sur la fenêtre de test interne du même modèle (03/10-06/10). Pas
+  d'optimisme mesurable, et le modèle tient sur un patch qu'il n'a jamais vu.
+- Calibration : prédit 40,0 % → observé 40,2 % ; 50,0 % → 49,5 % ;
+  58,7 % → 57,4 % (IC ± 2,1 pts par décile).
+- Plus d'écart entre niveaux : la draft prédit autant en Master+ qu'ailleurs.
+- Réserves : 482 parties du 07/10 figuraient dans la fenêtre de test du
+  réentraînement du 13/10 (chiffre agrégé seulement) ; le test de la couche
+  patch (section 13) a regardé le 16.20, mais cette couche n'est pas dans le
+  modèle évalué.
 
 ## Règles de méthode adoptées en cours de route
 
