@@ -604,6 +604,35 @@ un patch qu'aucune décision n'avait regardé.
   patch (section 13) a regardé le 16.20, mais cette couche n'est pas dans le
   modèle évalué.
 
+## 20. La maîtrise de champion et le décalage personnel (`mastery_familiarity.py`) — premier point, non concluant
+
+Question : l'app compte « jamais joué » un champion absent de l'historique
+analysé ; un champion beaucoup joué autrefois est-il pénalisé à tort ?
+Protocole prospectif : maîtrise des 15 741 joueurs du ladder photographiée
+les 13-14/10 (`fetch_masteries.py`), évaluation sur leurs seules parties jouées
+après la photo et après l'entraînement du modèle de l'app ; δ calculé comme
+dans l'app sur l'historique d'avant la photo.
+
+Premier point (16/10) : 23 676 parties de 4 516 joueurs. Le décalage de l'app
+y fait +0,00032 ± 0,00046 (non significatif à ce volume).
+
+Résultat − prédiction avec δ (points, à joueur égal), champions **absents de
+l'historique** selon leur maîtrise : ≤ 10k points −4,4 ± 3,0 ; 10-50k
+−0,4 ± 2,2 ; 50-150k +1,3 ± 2,4 ; > 150k +1,7 ± 3,4. Même tendance chez les
+champions joués 3+ fois : 10-50k −2,2 ± 2,3 ; 50-150k −1,2 ± 1,7 ; > 150k
++0,7 ± 0,8. Maîtrise nulle : seulement 156 parties (presque tout champion
+joué en partie classée a déjà de la maîtrise).
+
+Gain de prédiction en ajoutant la maîtrise (validation croisée groupée par
+joueur) : 14 classes +0,00001 ± 0,00042 ; une pente sur log(1 + points)
++0,00013 ± 0,00026. Pente : champions absents de l'historique +0,010 ± 0,019,
+présents +0,026 ± 0,017.
+
+- Tendance cohérente (plus de maîtrise, meilleur que prévu, même à historique
+  égal) mais pas de gain de prédiction démontré : **non intégré**.
+- À refaire quand le crawler aura fait un tour complet après la photo
+  (volume environ doublé).
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
