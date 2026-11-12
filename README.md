@@ -10,14 +10,14 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
 
 ## Ce que le modèle sait faire (et pas encore)
 
-Évaluation sur les 15 % de parties les plus récentes (~31 600 matchs, 211k au total) :
+Évaluation sur les 15 % de parties les plus récentes (~43 200 matchs, 288k au total) :
 
 | Modèle | Log-loss | Précision |
 |---|---|---|
-| Constante (toujours ~50 %) | 0,6930 | 50,8 % |
-| Force champion × rôle seule | 0,6901 | 53,2 % ± 0,5 |
-| Modèle sans matchups appris sur l'or | 0,6885 | 54,3 % ± 0,5 |
-| **Modèle complet** | **0,6874** | **54,5 % ± 0,5** |
+| Constante (toujours ~50 %) | 0,6931 | 50,7 % |
+| Force champion × rôle seule | 0,6898 | 53,4 % ± 0,5 |
+| Modèle sans matchups appris sur l'or | 0,6880 | 53,9 % ± 0,5 |
+| **Modèle complet** | **0,6870** | **54,4 % ± 0,5** |
 
 - La draft seule explique peu du résultat en Ranked Solo (le reste, ce sont les
   joueurs) : ~54 % est proche du plafond connu pour ce type de prédiction. Un
@@ -39,7 +39,7 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
   futures des joueurs : le décalage personnel améliore leur prédiction et il est
   bien dosé (pente 0,97 ± 0,13).
 - **Selon le niveau** : l'app applique les forces, les picks courants et la
-  calibration de ton niveau (facteurs 0,82 à 0,87 aujourd'hui), détecté depuis
+  calibration de ton niveau (facteurs 0,90 à 0,94 aujourd'hui), détecté depuis
   ton Riot ID.
 - **Counters appris sur les statistiques de lane** : le résultat d'une partie
   (1 bit) ne suffit pas à estimer ~15 000 matchups par rôle. Ils sont appris
@@ -47,6 +47,12 @@ modèle additif régularisé, évalué sur des parties récentes jamais vues.
   auxiliaire), puis transférés au modèle de victoire (cross-fitting). Gain
   significatif sur des parties futures ; le modèle retrouve des counters connus
   (Sett et Warwick contre Irelia, Malphite et Teemo contre Vayne top…).
+- **Des conseils validés, pas seulement des prédictions** : sur 110 000 parties
+  jouées après l'entraînement, les joueurs gagnent plus quand leur pick est
+  celui que l'outil aurait conseillé, et de l'écart prévu (pente 1,21 ± 0,14 à
+  joueur égal ; la part due à la draft, au-delà d'une tier list, est validée
+  séparément). Suivre l'outil parmi ses champions habituels vaudrait ~1,6 à
+  2,7 points de winrate (estimation sur données d'observation).
 - **Pas d'interaction « par ressemblance »** : synergies et counters déduits
   d'embeddings de champions (factorization machine) testés jusqu'à 150k matchs
   sans gain, donc pas de réseau de neurones entraîné sur la victoire.
@@ -65,6 +71,7 @@ fetch_masteries.py   Photo de la maîtrise de champions des joueurs du ladder
 config.py            Routing API, chemins, paramètres du crawler
 api/
   client.py          Client HTTP Riot (rate limiting, retries, erreurs de clé)
+  lcu.py             Lecture de la sélection de champions dans le client du jeu (API locale)
   crawler.py         Échantillonnage du ladder et extraction des matchs
 db/
   schema.py          Schéma SQLite (matches, participants, bans, ladder_players)
@@ -76,6 +83,7 @@ ml/
   evaluate.py        Évaluation scellée d'un modèle sur une période jamais vue
   recommend.py       Recommandation sur une draft partielle (+ CLI)
   personal.py        Personnalisation par l'historique du joueur
+  live_draft.py      Draft en direct : picks verrouillés, rôles adverses déduits
   lane_stats.py      Matchups appris sur la part d'or des laners (tâche auxiliaire)
   display_names.py   Noms et icônes des champions (Data Dragon)
 data/
@@ -111,6 +119,14 @@ Riot ID importe ton historique et ton rang (le niveau est alors réglé
 automatiquement) : chaque champion reçoit un décalage personnel, coût
 d'inexpérience compris pour ceux que tu ne joues pas, et tu peux te limiter à
 ton pool. Sans profil, précise ton niveau : la base sur-représente le haut ELO.
+
+**Suivi en direct** : active « Suivre ma sélection de champions » avec le client
+League of Legends ouvert sur le même ordinateur. L'app lit toutes les 2 secondes
+ton rôle, ton côté, les picks verrouillés et les bans, et met le classement à
+jour sans rien saisir. Le client ne donne pas le rôle des champions adverses :
+il est déduit de leurs rôles habituels (attribution globale la plus probable),
+et une correction à la main est conservée. Lecture seule, sur la machine locale ;
+l'API du client n'est pas une API publique de Riot (usage personnel).
 
 **Collecte des matchs**
 
@@ -190,7 +206,7 @@ logit P(victoire) = avantage de côté
                   + équilibre des dégâts de l'équipe
                   + sensibilité de certains champions au profil adverse
                   + écarts de force par tranche d'ELO      (quand les données les établissent)
-                  + évolution des forces de patch en patch (idem ; rejetée à ce jour)
+                  + évolution des forces de patch en patch (idem ; adoptée de justesse à 288k matchs)
 ```
 
 Chaque groupe d'effets a sa propre force de régularisation, choisie par
