@@ -633,6 +633,101 @@ présents +0,026 ± 0,017.
 - À refaire quand le crawler aura fait un tour complet après la photo
   (volume environ doublé).
 
+Points suivants (12/11), même script :
+
+| Parties après la photo | Gain, pente sur log(points) | Pente, champions absents de l'historique | Pente, présents |
+|---|---|---|---|
+| 23 676 (16/10) | +0,00013 ± 0,00026 | +0,010 ± 0,019 | +0,026 ± 0,017 |
+| 33 853 | +0,00015 ± 0,00020 | +0,009 ± 0,016 | +0,025 ± 0,014 |
+| 58 138 | +0,00016 ± 0,00018 | +0,018 ± 0,011 | +0,022 ± 0,011 |
+
+Le gain est stable et son intervalle se resserre avec le volume ; les pentes
+deviennent significatives, mais pas encore le gain de prédiction sur de nouveaux
+joueurs. Toujours non intégré ; le crawler relancé le 12/11 rapporte des
+parties postérieures à la photo à chaque passage.
+
+## 21. Suivre l'outil fait-il gagner ? (`decision_value.py`, 12/11)
+
+Jusqu'ici on avait validé des prédictions, pas des conseils. Pour chaque partie
+jouée après l'entraînement du modèle de l'app (07/10) par un joueur du ladder,
+on reconstitue ce que l'outil lui aurait affiché à son pick : les 9 autres
+champions (situation d'un dernier pick : on n'a pas l'ordre), les bans, son
+côté, son niveau et son profil construit sur ses parties d'avant.
+110 388 parties de 6 003 joueurs (≥ 5 parties chacun), presque toutes en 16.20.
+
+Le score du champion joué se décompose : reste de la draft B + tier list
+(valeur sans rien connaître de la draft) + apport de la draft (matchup,
+synergies, composition) + décalage personnel δ.
+
+**1. Validité** (à joueur égal : effets fixes joueur, modèle linéaire de
+probabilité, erreurs groupées par joueur et par match ; pente 1 = bien dosé) :
+
+| Composante | Pente | Écart-type à joueur égal |
+|---|---|---|
+| Reste de la draft | 1,09 ± 0,11 | 4,7 pts |
+| **Score du pick, en un bloc** | **1,21 ± 0,14** | 2,2 pts |
+| — tier list | 1,08 ± 0,24 | 1,3 pt |
+| — apport de la draft | **1,33 ± 0,27** | 1,2 pt |
+| — décalage personnel | 1,23 ± 0,22 | 1,3 pt |
+
+Les trois composantes du conseil sont validées séparément, y compris l'apport
+de la draft, qui est ce que l'outil ajoute à une tier list. Les pentes un peu
+au-dessus de 1 indiquent des écarts entre picks légèrement sous-estimés
+(cohérent avec des facteurs de calibration de 0,82 à 0,87 un peu trop bas sur
+cette période).
+
+**2. Marge** (pool = champions joués ≥ 3 fois à ce rôle dans l'historique ;
+58 % des parties ont un pool d'au moins 2 champions, médiane 3) :
+- le joueur a pris le pick n°1 de l'outil dans 30 % des cas ; regret moyen
+  2,2 pts de proba prédite, soit un gain attendu de **≈ 2,7 pts** en suivant
+  l'outil (regret × pente) ;
+- quand le pick joué est lui-même dans son pool (seule la draft départage) :
+  pick n°1 dans 42 % des cas, regret 1,3 pt, soit **≈ 1,6 pt** ;
+- parmi tous les champions, coût d'inexpérience compris : ≈ 3,1 pts.
+
+**3. Résultat réel selon l'écart au conseil** (points, à joueur égal, relatif
+au reste de la draft) :
+
+| | Parties | Prédit | Observé |
+|---|---|---|---|
+| Pick n°1 joué | 19 218 | +1,57 | +1,48 ± 0,68 |
+| Regret ≤ 1 pt | 7 948 | +0,80 | +0,84 ± 1,05 |
+| Regret 1-2 pts | 8 488 | +0,32 | +0,26 ± 1,02 |
+| Regret > 2 pts | 28 716 | −1,37 | −1,30 ± 0,55 |
+
+- **Les joueurs gagnent plus quand leur pick est celui que l'outil aurait
+  conseillé, et de l'écart prévu** : 2,8 pts entre « pick n°1 » et « regret
+  > 2 pts », pour 2,9 prédits.
+- Limites : données d'observation (un joueur choisit ce qu'il sent bien, ce que
+  l'effet fixe joueur et δ ne captent qu'en partie) ; les 9 autres picks sont
+  supposés connus, donc la marge est un maximum (dernier pick) ; joueurs du
+  ladder actifs ; pool limité à l'historique en base. Ce n'est pas une
+  expérience contrôlée.
+
+## 22. Point à 288k matchs (12/11) : la couche patch adoptée de justesse
+
+Crawler relancé le 12/11 après un mois d'arrêt (patch courant : 16.22).
+Réentraînement sur 288 266 matchs exploitables : 58,9k du 16.20, et les
+premiers milliers des 16.21 et 16.22.
+
+- Réglages retenus : C 0,03 ; lane 0,3 ; duo 0,15 ; équilibre 0,3 ; tier 0,15 ;
+  **patch 0,15**. La validation glissante adopte pour la première fois la
+  couche patch, à sa plus petite échelle et de justesse : log-loss 0,68866 →
+  0,68860, soit +0,00006 pour un seuil de parcimonie de 0,00005. Les patchs
+  suivis vont du 16.16 au 16.22 ; les forces principales sont désormais celles
+  du 16.22. À surveiller : un gain aussi proche du seuil peut basculer au
+  prochain entraînement (comme les sensibilités avant leur règle dédiée), et le
+  test de la section 13 montrait que cette couche nuit quand elle est peu
+  régularisée.
+- Matchups appris sur l'or : +0,00088 ± 0,00028 en validation, adoptés.
+  Sensibilités : +0,00010 ± 0,00009.
+- Test (43 240 matchs, 11/10 → 11/11, surtout 16.20) : **+0,00603 ± 0,00112**,
+  précision 54,4 %. Calibration : prédit 38,8 % → observé 39,8 % ;
+  59,6 % → 58,8 %.
+- Facteurs de calibration : 0,90 (Master+), 0,93 (Gold-Platine), 0,94
+  (Émeraude-Diamant). τ = 0,132. Coût d'un champion jamais joué : −0,094 logit
+  (pick courant), −0,152 (niche).
+
 ## Règles de méthode adoptées en cours de route
 
 - **Parcimonie** dans le réglage : une complexité supplémentaire n'est retenue
