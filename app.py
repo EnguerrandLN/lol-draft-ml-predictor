@@ -8,6 +8,7 @@ Le modèle est lu depuis data/additive_model.json (produit par
 ml/train.py) et rechargé automatiquement s'il est réentraîné.
 """
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -15,12 +16,14 @@ import streamlit as st
 from dotenv import dotenv_values
 
 sys.path.insert(0, str(Path(__file__).parent))
+from api import lcu
 from api.client import ApiKeyError, ApiUnavailableError, RiotApiClient
 from config import DATA_DIR
 from db.schema import init_db
 from ml.additive_model import AdditiveDraftModel
 from ml.display_names import load_champion_display
 from ml.draft_data import ROLES, TIER_BUCKET_LABELS, TIER_TO_BUCKET, connect_read_only
+from ml.live_draft import LiveDraft, parse_champ_select, resolve
 from ml.personal import ChampionProfile, fetch_history, personal_offsets, player_profile
 from ml.recommend import DraftRecommender, DraftState
 
@@ -59,10 +62,78 @@ def name(cid: int) -> str:
 champ_ids: list[int] = sorted(display, key=lambda c: name(c).lower())
 
 
+# ── Partie en cours : suivi de la sélection de champions du client du jeu ─────
+
+LIVE_POLL_S: int = 2
+st.session_state.setdefault("role", "TOP")
+
+
+def enemy_role_corrections() -> dict[int, str]:
+    """Champion adverse → rôle, pour ceux que le joueur a déplacés à la main depuis la dernière synchronisation."""
+    corrections: dict[int, str] = dict(st.session_state.get("live_enemy_pinned", {}))
+    shown = {st.session_state.get(f"enemy_{r}"): r for r in ROLES}
+    for role, champ in st.session_state.get("live_enemy_applied", {}).items():
+        if champ in shown and shown[champ] != role:
+            corrections[champ] = shown[champ]
+    return corrections
+
+
+def apply_live_draft(live: LiveDraft) -> None:
+    """Recopie la draft du client dans les champs de l'app (à appeler avant leur création)."""
+    known = set(champ_ids)
+    if live.role:
+        st.session_state["role"] = live.role
+    if live.side:
+        st.session_state["side"] = live.side
+    pinned = enemy_role_corrections() if (live.enemy or live.ally or live.bans) else {}   # Nouvelle draft : on repart de zéro
+    ally, enemy = resolve(replace(live, role=live.role or st.session_state["role"]), rec.model.games, pinned)
+    for r in ROLES:
+        st.session_state[f"ally_{r}"] = ally.get(r) if ally.get(r) in known else None
+        st.session_state[f"enemy_{r}"] = enemy.get(r) if enemy.get(r) in known else None
+    st.session_state["bans"] = [c for c in sorted(live.bans) if c in known]
+    st.session_state["live_enemy_pinned"] = pinned
+    st.session_state["live_enemy_applied"] = enemy
+    st.session_state["live_picks_left"] = live.enemy_picks_left
+
+
+@st.fragment(run_every=LIVE_POLL_S)
+def follow_client() -> None:
+    """Interroge le client toutes les 2 s ; ne relance l'app que si la draft a changé."""
+    status, session = lcu.champ_select_session()
+    if status != lcu.OK:
+        st.session_state.pop("live_signature", None)
+        st.caption("Client du jeu introuvable : lance League of Legends." if status == lcu.NO_CLIENT
+                   else "Client détecté. En attente d'une sélection de champions…")
+        return
+    live = parse_champ_select(session)
+    if live.signature() != st.session_state.get("live_signature"):
+        st.session_state["live_signature"] = live.signature()
+        st.session_state["pending_live"] = live
+        st.rerun()
+    n_picks = len(live.ally) + len(live.ally_unassigned) + len(live.enemy) + (live.my_champion is not None)
+    st.caption(f"🟢 Draft suivie en direct : {n_picks}/10 picks, {len(live.bans)} ban(s).")
+
+
 # ── Barre latérale ────────────────────────────────────────────────────────────
 
 meta = rec.model.meta
 with st.sidebar:
+    st.header("Partie en cours")
+    following = st.toggle(
+        "Suivre ma sélection de champions", key="follow",
+        help="Lit en direct, dans le client League of Legends ouvert sur cet ordinateur, ton rôle, ton côté, "
+             "les picks verrouillés et les bans, et remplit la draft à ta place.  \n"
+             "Le client ne donne pas le rôle des champions adverses : il est déduit de ce qu'ils jouent "
+             "d'habitude. Si l'un est mal placé, déplace-le à la main : ta correction est conservée.",
+    )
+    if "pending_live" in st.session_state:
+        apply_live_draft(st.session_state.pop("pending_live"))
+    if following:
+        follow_client()
+    else:
+        st.session_state.pop("live_signature", None)
+        st.session_state.pop("live_picks_left", None)
+
     st.header("Modèle")
     start, end = (pd.to_datetime(t, unit="ms").date() for t in meta["date_range"])
     test = meta["test_results"]["Modèle retenu"]
@@ -197,7 +268,7 @@ st.title("🎯 LoL Draft Advisor")
 
 col_role, col_side = st.columns([3, 2])
 role: str = col_role.segmented_control(
-    "Rôle à pourvoir", ROLES, format_func=ROLE_LABELS.get, default="TOP", key="role"
+    "Rôle à pourvoir", ROLES, format_func=ROLE_LABELS.get, key="role"
 ) or "TOP"
 side = col_side.segmented_control(
     "Ton côté (optionnel)", list(SIDE_LABELS), format_func=SIDE_LABELS.get, key="side"
@@ -223,7 +294,7 @@ with col_enemy:
     enemy = {r: champion_select(ROLE_LABELS[r], f"enemy_{r}") for r in ROLES}
 
 col_bans, col_pool = st.columns(2)
-bans = col_bans.multiselect("Bans", champ_ids, format_func=name, max_selections=10)
+bans = col_bans.multiselect("Bans", champ_ids, format_func=name, max_selections=10, key="bans")
 pool = col_pool.multiselect(
     "Mon pool (optionnel)", champ_ids, format_func=name,
     help="Ne proposer que les champions que tu sais jouer.",
@@ -285,10 +356,13 @@ col_metric.metric(
     help="Probabilité de victoire de la draft actuelle si tu prends un champion moyen à ce rôle. "
          "Les slots encore vides sont estimés d'après ce qui se joue habituellement.",
 )
+picks_left = st.session_state.get("live_picks_left")
 col_info.caption(
     f"{n_known}/9 autres champions connus · {len(bans)} ban(s). "
     + ("Ton vis-à-vis est connu : « Si contré » = « Victoire »." if role in enemy_picks
        else "Ton vis-à-vis n'est pas encore choisi : « Si contré » montre ton exposition aux counters.")
+    + (f"  \nIl reste {picks_left} pick(s) adverse(s) après les picks en cours : monte la prudence "
+       "si tu choisis avant ton vis-à-vis." if picks_left and role not in enemy_picks else "")
 )
 
 if not results:
